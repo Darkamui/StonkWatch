@@ -1,0 +1,145 @@
+@page
+@using System.Globalization
+@model StonkWatch.Web.Pages.Candidates.IndexModel
+@{
+    ViewData["Title"] = "Watchlist";
+}
+
+<div class="d-flex justify-content-between align-items-center mb-3">
+    <h1 class="h3 mb-0">Watchlist</h1>
+    <a class="btn btn-primary btn-sm" asp-page="/Candidates/New">Add candidate</a>
+</div>
+
+@if (!string.IsNullOrEmpty(Model.FilterError))
+{
+    <div class="alert alert-warning">@Model.FilterError</div>
+}
+
+<form method="get" class="row g-2 mb-3">
+    <div class="col-auto">
+        <select name="status" class="form-select form-select-sm" onchange="this.form.submit()">
+            <option value="">All statuses</option>
+            @foreach (var s in Enum.GetNames<CandidateStatus>())
+            {
+                <option value="@s" selected="@(s == Model.Status)">@s</option>
+            }
+        </select>
+    </div>
+    <div class="col-auto">
+        <select name="priority" class="form-select form-select-sm" onchange="this.form.submit()">
+            <option value="">All priorities</option>
+            @foreach (var p in Enum.GetNames<Priority>())
+            {
+                <option value="@p" selected="@(p == Model.Priority)">@p</option>
+            }
+        </select>
+    </div>
+    @if (!string.IsNullOrEmpty(Model.Status) || !string.IsNullOrEmpty(Model.Priority))
+    {
+        <div class="col-auto">
+            <a class="btn btn-sm btn-outline-secondary" asp-page="/Candidates/Index">Clear filters</a>
+        </div>
+    }
+</form>
+
+@if (Model.Candidates.Count == 0)
+{
+    <p class="text-muted">No candidates match this filter.</p>
+}
+else
+{
+    <div class="table-responsive">
+        <table class="table table-sm table-hover align-middle">
+            <thead>
+                <tr>
+                    <th>Ticker</th>
+                    <th>Company</th>
+                    <th>Priority</th>
+                    <th>Status</th>
+                    <th>Conv</th>
+                    <th>Price</th>
+                    <th>Quote</th>
+                    <th>Plan range</th>
+                    <th>Reviewed</th>
+                    <th>Next event</th>
+                    <th></th>
+                </tr>
+            </thead>
+            <tbody>
+                @foreach (var c in Model.Candidates)
+                {
+                    var alerts = Model.TriggeredAlerts.GetValueOrDefault(c.Ticker, []);
+                    var isBearish = alerts.Any(a => a.AlertType is "Invalidation" or "PrimarySupport" or "SecondarySupport");
+                    var isBullish = alerts.Any(a => a.AlertType is "ReclaimTrigger" or "Target");
+                    var rowClass = isBearish ? "table-danger" : isBullish ? "table-success" : "";
+                    var ladder = LevelLadder.Build(c);
+                    <tr class="@rowClass">
+                        <td>
+                            <a asp-page="/Candidates/Detail" asp-route-ticker="@c.Ticker">@c.Ticker</a>
+                            @if (alerts.Count > 0)
+                            {
+                                <div class="d-flex flex-wrap gap-1 mt-1">
+                                    @foreach (var a in alerts.Select(a => a.AlertType).Distinct())
+                                    {
+                                        <span class="badge text-bg-light text-muted">@a</span>
+                                    }
+                                </div>
+                            }
+                        </td>
+                        <td>@c.Company</td>
+                        <td>@c.Priority</td>
+                        <td style="min-width: 10rem;">
+                            <form method="post" asp-page-handler="UpdateStatus" asp-route-ticker="@c.Ticker">
+                                <input type="hidden" name="status" value="@Model.Status" />
+                                <input type="hidden" name="priority" value="@Model.Priority" />
+                                <select name="newStatus" class="form-select form-select-sm" onchange="this.form.submit()">
+                                    @foreach (var s in Enum.GetNames<CandidateStatus>())
+                                    {
+                                        <option value="@s" selected="@(s == c.Status)">@s</option>
+                                    }
+                                </select>
+                            </form>
+                        </td>
+                        <td>@c.Conviction</td>
+                        <td>@c.CurrentPrice</td>
+                        <td>
+                            @(c.LastQuote?.ToString("0.00##") ?? "—")
+                            <div class="text-muted" style="font-size:0.7rem;">@(c.QuoteAt?.ToLocalTime().ToString("yyyy-MM-dd HH:mm") ?? "never scanned")</div>
+                        </td>
+                        <td>
+                            @if (ladder is not null)
+                            {
+                                <div class="ladder-compact" title="Plan range for @c.Ticker">
+                                    <div class="ladder-track">
+                                        @foreach (var t in ladder.Ticks)
+                                        {
+                                            <div class="ladder-tick kind-@t.Kind" style="left:@(t.Percent.ToString("0.##", CultureInfo.InvariantCulture))%" title="@t.Label @t.ValueDisplay"></div>
+                                        }
+                                        @if (ladder.Current is { } cur)
+                                        {
+                                            <div class="ladder-current" style="left:@(cur.Percent.ToString("0.##", CultureInfo.InvariantCulture))%" title="Last @cur.ValueDisplay"></div>
+                                        }
+                                    </div>
+                                </div>
+                            }
+                            else
+                            {
+                                <span class="text-muted">—</span>
+                            }
+                        </td>
+                        <td>@(c.LastReviewed?.ToString("yyyy-MM-dd") ?? "never")</td>
+                        <td>@c.NextEvent</td>
+                        <td class="text-end">
+                            <form method="post" asp-page-handler="Delete" asp-route-ticker="@c.Ticker"
+                                  onsubmit="return confirm('Delete @c.Ticker? This also removes its alerts and review history.');">
+                                <input type="hidden" name="status" value="@Model.Status" />
+                                <input type="hidden" name="priority" value="@Model.Priority" />
+                                <button type="submit" class="btn btn-sm btn-outline-danger">Delete</button>
+                            </form>
+                        </td>
+                    </tr>
+                }
+            </tbody>
+        </table>
+    </div>
+}

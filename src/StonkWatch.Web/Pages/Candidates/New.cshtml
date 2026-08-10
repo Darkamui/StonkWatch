@@ -1,0 +1,30 @@
+@page
+@model StonkWatch.Web.Pages.Candidates.NewModel
+@{
+    ViewData["Title"] = "Add candidate";
+}
+
+<h1 class="h3 mb-3">Add candidate</h1>
+<p class="text-muted mb-4" style="max-width: 40rem;">Ticker is the only thing you need right now — everything else can be filled in as the thesis takes shape.</p>
+
+@if (!string.IsNullOrEmpty(Model.ErrorMessage))
+{
+    <div class="alert alert-danger">@Model.ErrorMessage</div>
+}
+
+<form method="post">
+    <div class="row g-3">
+        <div class="col-md-4">
+            <label asp-for="Ticker" class="form-label"></label>
+            <input asp-for="Ticker" class="form-control" autofocus style="text-transform: uppercase;" />
+            <span asp-validation-for="Ticker" class="text-danger"></span>
+        </div>
+    </div>
+
+    <partial name="_CandidateFormFields" for="Form" />
+
+    <div class="mt-4">
+        <button type="submit" class="btn btn-primary">Add candidate</button>
+        <a class="btn btn-outline-secondary" asp-page="/Candidates/Index">Cancel</a>
+    </div>
+</form>

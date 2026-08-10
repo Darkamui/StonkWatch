@@ -1,0 +1,28 @@
+﻿@page
+@model ErrorModel
+@{
+    ViewData["Title"] = "Error";
+}
+
+<h1 class="h3 text-danger mb-2">Something broke.</h1>
+<p class="text-muted mb-4">The request couldn't be completed. Try again, or check the server logs.</p>
+
+@if (Model.ShowRequestId)
+{
+    <p>
+        <span class="eyebrow">Request ID</span> <code>@Model.RequestId</code>
+    </p>
+}
+
+<hr class="my-4" />
+
+<h2 class="h6 text-uppercase text-muted">Development mode</h2>
+<p class="text-muted">
+    Swapping to the <strong>Development</strong> environment displays detailed information about the error that occurred.
+</p>
+<p class="text-muted">
+    <strong>The Development environment shouldn't be enabled for deployed applications.</strong>
+    It can result in displaying sensitive information from exceptions to end users.
+    For local debugging, enable the <strong>Development</strong> environment by setting the <strong class="text-body">ASPNETCORE_ENVIRONMENT</strong> environment variable to <strong>Development</strong>
+    and restarting the app.
+</p>

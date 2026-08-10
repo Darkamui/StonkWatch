@@ -1,0 +1,16 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: stonkwatch-postgres-dev
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: stonkwatch
+      POSTGRES_USER: stonkwatch
+      POSTGRES_PASSWORD: devpassword
+    ports:
+      - "5432:5432"
+    volumes:
+      - stonkwatch-dev-data:/var/lib/postgresql/data
+
+volumes:
+  stonkwatch-dev-data:
