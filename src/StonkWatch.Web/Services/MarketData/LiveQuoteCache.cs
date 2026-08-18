@@ -85,25 +85,24 @@ public sealed class LiveQuoteCache(TimeProvider timeProvider)
         // frame disagreeing with what Get() returns. Holding _gate across both closes that.
         lock (_gate)
         {
-            LiveQuote updated;
-            bool changed;
             if (_quotes.TryGetValue(symbol, out var existing))
             {
-                changed = existing.LastAt is not { } lastAt || trade.At >= lastAt;
-                updated = changed ? existing with { Last = trade.Price, LastAt = trade.At } : existing;
+                var changed = existing.LastAt is not { } lastAt || trade.At >= lastAt;
+                if (!changed)
+                {
+                    // A discarded trade must not mutate the table or fan out a quote that
+                    // didn't change.
+                    return;
+                }
+
+                var updated = existing with { Last = trade.Price, LastAt = trade.At };
+                _quotes[symbol] = updated;
+                Publish(updated);
             }
             else
             {
-                updated = new LiveQuote(symbol, trade.Price, trade.At);
-                changed = true;
-            }
-
-            _quotes[symbol] = updated;
-
-            // Only publish when this call actually won the write — a discarded trade must
-            // not fan out a quote that didn't change.
-            if (changed)
-            {
+                var updated = new LiveQuote(symbol, trade.Price, trade.At);
+                _quotes[symbol] = updated;
                 Publish(updated);
             }
         }
@@ -238,16 +237,44 @@ public sealed class LiveQuoteCache(TimeProvider timeProvider)
         : IAsyncEnumerable<LiveQuote>
     {
         public IAsyncEnumerator<LiveQuote> GetAsyncEnumerator(CancellationToken cancellationToken = default) =>
-            cache.Subscribe(cancellationToken == default ? subscribeToken : cancellationToken);
+            cache.Subscribe(subscribeToken, cancellationToken);
     }
 
-    private IAsyncEnumerator<LiveQuote> Subscribe(CancellationToken ct)
+    /// <param name="subscribeToken">The token <see cref="SubscribeAsync"/> was called with.</param>
+    /// <param name="enumerationToken">
+    /// The token the consumer's own <c>GetAsyncEnumerator</c> call supplied (e.g. from
+    /// <c>WithCancellation</c>). Both can independently end the enumeration — a connection-
+    /// scoped token passed to <see cref="SubscribeAsync"/> and a shutdown token passed at
+    /// enumeration time are both real cancellation sources for an SSE handler — so when both
+    /// are capable of firing and differ, they're linked rather than one silently overriding
+    /// the other.
+    /// </param>
+    private IAsyncEnumerator<LiveQuote> Subscribe(CancellationToken subscribeToken, CancellationToken enumerationToken)
     {
+        CancellationTokenSource? linkedCts = null;
+        CancellationToken ct;
+        if (subscribeToken.CanBeCanceled && enumerationToken.CanBeCanceled && subscribeToken != enumerationToken)
+        {
+            linkedCts = CancellationTokenSource.CreateLinkedTokenSource(subscribeToken, enumerationToken);
+            ct = linkedCts.Token;
+        }
+        else
+        {
+            ct = enumerationToken.CanBeCanceled ? enumerationToken : subscribeToken;
+        }
+
         var id = Guid.NewGuid();
         var channel = Channel.CreateBounded<LiveQuote>(new BoundedChannelOptions(256)
         {
             FullMode = BoundedChannelFullMode.DropOldest,
             SingleReader = true,
+            // Explicitly false (matches the default, pinned so a future latency tweak can't
+            // flip it by accident): Publish below iterates _subscribers live rather than a
+            // defensive copy, which is only safe because a reader's continuation can never
+            // run inline on the publishing (ingest) thread. If this were true, a
+            // continuation could mutate _subscribers from inside Publish's own foreach,
+            // throwing InvalidOperationException on the ingest path.
+            AllowSynchronousContinuations = false,
         });
 
         lock (_gate)
@@ -255,7 +282,45 @@ public sealed class LiveQuoteCache(TimeProvider timeProvider)
             _subscribers[id] = channel;
         }
 
-        return ReadAsync(id, channel, ct).GetAsyncEnumerator(ct);
+        var inner = ReadAsync(id, channel, ct).GetAsyncEnumerator(ct);
+        return new SubscriptionEnumerator(this, id, channel, inner, linkedCts);
+    }
+
+    /// <summary>
+    /// Wraps the <see cref="ReadAsync"/> iterator so cleanup happens on <c>DisposeAsync</c>
+    /// no matter what: an async-iterator's own <c>finally</c> only runs if its state machine
+    /// ever started (i.e. <c>MoveNextAsync</c> was called at least once) — disposing one that
+    /// never started is a documented no-op. Subscribe registers the subscriber *before* the
+    /// iterator exists (so a trade applied between <c>GetAsyncEnumerator</c> and the first
+    /// <c>MoveNextAsync</c> isn't missed), which means a caller that disposes without ever
+    /// reading would otherwise leak that registration forever. This wrapper repeats the same
+    /// cleanup unconditionally in its own <c>DisposeAsync</c>; removing an already-removed
+    /// dictionary entry and completing an already-completed channel are both no-ops, so doing
+    /// it twice when the inner iterator's own <c>finally</c> did run is harmless.
+    /// </summary>
+    private sealed class SubscriptionEnumerator(
+        LiveQuoteCache cache,
+        Guid id,
+        Channel<LiveQuote> channel,
+        IAsyncEnumerator<LiveQuote> inner,
+        CancellationTokenSource? linkedCts) : IAsyncEnumerator<LiveQuote>
+    {
+        public LiveQuote Current => inner.Current;
+
+        public ValueTask<bool> MoveNextAsync() => inner.MoveNextAsync();
+
+        public async ValueTask DisposeAsync()
+        {
+            await inner.DisposeAsync();
+
+            lock (cache._gate)
+            {
+                cache._subscribers.Remove(id);
+            }
+
+            channel.Writer.TryComplete();
+            linkedCts?.Dispose();
+        }
     }
 
     private async IAsyncEnumerable<LiveQuote> ReadAsync(

@@ -396,4 +396,104 @@ public class LiveQuoteCacheTests
 
         Assert.Null(violation);
     }
+
+    // Fix A: SubscribeAsync(subscribeToken).GetAsyncEnumerator(enumerationToken) must link
+    // both tokens, not pick one. Before this fix, GetAsyncEnumerator did
+    // `cancellationToken == default ? subscribeToken : cancellationToken` -- since
+    // enumerationCts.Token is non-default here, that expression discards subscribeToken
+    // entirely, so cancelling it would never end the enumeration and MoveNextAsync would
+    // hang. Verified this fails (times out against the 5s guard, not a true hang) against
+    // the token-picking implementation.
+    [Fact]
+    public async Task Cancelling_the_subscribe_token_ends_enumeration_started_under_a_different_token()
+    {
+        var cache = NewCache();
+        using var subscribeCts = new CancellationTokenSource();
+        using var enumerationCts = new CancellationTokenSource();
+
+        var enumerator = cache.SubscribeAsync(subscribeCts.Token).GetAsyncEnumerator(enumerationCts.Token);
+
+        cache.ApplyTrade(new Trade("ASTS", 67.61m, Now));
+        Assert.True(await enumerator.MoveNextAsync());
+
+        subscribeCts.Cancel();
+
+        // A bounded guard against a genuine hang if this regresses -- not synchronization
+        // for the behavior under test, which is driven entirely by subscribeCts.Cancel()
+        // above.
+        var moveNextTask = enumerator.MoveNextAsync().AsTask();
+        var winner = await Task.WhenAny(moveNextTask, Task.Delay(TimeSpan.FromSeconds(5)));
+
+        Assert.Same(moveNextTask, winner);
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => moveNextTask);
+    }
+
+    // Fix B: SubscribeAsync itself must do no registration work -- only GetAsyncEnumerator
+    // does. Before Fix 4, SubscribeAsync registered the channel eagerly on the call itself
+    // (a single shared channel per call, reused by however many times the result was
+    // enumerated), so merely calling SubscribeAsync without ever enumerating it already
+    // registered a subscriber. Verified this fails (SubscriberCount == 1, not 0) against
+    // that implementation.
+    [Fact]
+    public void Calling_SubscribeAsync_without_enumerating_registers_no_subscriber()
+    {
+        var cache = NewCache();
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+
+        _ = cache.SubscribeAsync(cts.Token);
+
+        Assert.Equal(0, cache.SubscriberCount);
+    }
+
+    // Fix B (second half): two GetAsyncEnumerator calls on one returned IAsyncEnumerable
+    // must register two independent subscribers, each with its own channel, both of which
+    // receive the same trade. Before Fix 4, the single channel created inside SubscribeAsync
+    // was shared by every enumeration of the result, so this registered one subscriber, not
+    // two, and having two concurrent readers on a SingleReader = true channel meant at most
+    // one of them could ever actually receive a given trade. Verified this fails
+    // (SubscriberCount == 1, and the second reader never receives the trade within the 5s
+    // guard) against that implementation.
+    [Fact]
+    public async Task Enumerating_the_same_subscription_twice_registers_two_subscribers_that_both_receive_a_trade()
+    {
+        var cache = NewCache();
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+
+        var subscription = cache.SubscribeAsync(cts.Token);
+        var first = subscription.GetAsyncEnumerator(cts.Token);
+        var second = subscription.GetAsyncEnumerator(cts.Token);
+
+        Assert.Equal(2, cache.SubscriberCount);
+
+        cache.ApplyTrade(new Trade("ASTS", 67.61m, Now));
+
+        var firstMoveNext = first.MoveNextAsync().AsTask();
+        var secondMoveNext = second.MoveNextAsync().AsTask();
+        await Task.WhenAll(firstMoveNext, secondMoveNext);
+
+        Assert.True(await firstMoveNext);
+        Assert.True(await secondMoveNext);
+        Assert.Equal(67.61m, first.Current.Last);
+        Assert.Equal(67.61m, second.Current.Last);
+    }
+
+    // Fix C: disposing a subscription that never enumerated (no MoveNextAsync at all) must
+    // still remove it. Disposing an async-iterator's state machine before it has started is
+    // a documented no-op -- the iterator's own `finally`, where cleanup normally happens,
+    // never runs -- so before this fix the subscriber stayed registered forever. Verified
+    // this fails (SubscriberCount == 1 after DisposeAsync, not 0) against the
+    // implementation that relied solely on the inner iterator's `finally`.
+    [Fact]
+    public async Task Disposing_a_subscription_that_never_enumerated_removes_the_subscriber()
+    {
+        var cache = NewCache();
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+
+        var enumerator = cache.SubscribeAsync(cts.Token).GetAsyncEnumerator(cts.Token);
+        Assert.Equal(1, cache.SubscriberCount);
+
+        await enumerator.DisposeAsync();
+
+        Assert.Equal(0, cache.SubscriberCount);
+    }
 }
