@@ -353,6 +353,7 @@ git commit -m "feat: add watchlist_groups and watchlist_items tables"
 
 **Files:**
 - Create: `src/StonkWatch.Web/Contracts/WatchlistContracts.cs`
+- Create: `src/StonkWatch.Web/Services/Watchlist/LiveWatchlistOptions.cs`
 - Create: `src/StonkWatch.Web/Services/Watchlist/WatchlistService.cs`
 - Test: `tests/StonkWatch.Web.Tests/WatchlistServiceTests.cs`
 
@@ -2724,7 +2725,10 @@ public class WatchlistEndpointsTests(PostgresFixture fixture) : IAsyncLifetime
     public async Task Unauthenticated_requests_are_rejected()
     {
         using var factory = NewFactory();
-        using var client = factory.CreateClient();
+        // Redirects off: the cookie scheme challenges with a 302 to /Account/Login, and
+        // a client that follows it would report the login page's 200 instead.
+        using var client = factory.CreateClient(
+            new WebApplicationFactoryClientOptions { AllowAutoRedirect = false });
 
         var response = await client.GetAsync("/api/watchlist");
 
@@ -3038,7 +3042,9 @@ git commit -m "feat: add watchlist API and SSE stream endpoint"
    ============================================================ */
 
 :root {
-  --watchlist-width: 300px;
+  /* 340px rather than TradingView's ~300: the spec mandates four data columns
+     (Last, Chg%, Vol, Ext) and Ext does not fit at 300 without dropping one. */
+  --watchlist-width: 340px;
   --watchlist-rail: 44px;
 }
 
@@ -3099,10 +3105,10 @@ git commit -m "feat: add watchlist API and SSE stream endpoint"
 .watchlist-cols,
 .watchlist-row {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 4.4rem 3.6rem 3.6rem;
-  gap: 0.35rem;
+  grid-template-columns: minmax(0, 1fr) 4rem 3.4rem 3.2rem 3.4rem;
+  gap: 0.3rem;
   align-items: center;
-  padding: 0.3rem 0.6rem;
+  padding: 0.3rem 0.55rem;
 }
 
 .watchlist-cols {
@@ -3115,9 +3121,6 @@ git commit -m "feat: add watchlist API and SSE stream endpoint"
 
 .watchlist-cols > span:not(:first-child),
 .watchlist-row > .num { text-align: right; }
-
-/* Ext is a fifth value but shares the Vol column's row beneath it on narrow panels. */
-.watchlist-cols > span:last-child { display: none; }
 
 .watchlist-body { overflow-y: auto; flex: 1 1 auto; }
 
@@ -3372,7 +3375,7 @@ git commit -m "feat: add live watchlist sidebar shell and styles"
         sym.appendChild(label);
         el.appendChild(sym);
 
-        ['last', 'change', 'volume'].forEach(function (field) {
+        ['last', 'change', 'volume', 'ext'].forEach(function (field) {
             var cell = document.createElement('span');
             cell.className = 'num empty';
             cell.setAttribute('data-field', field);
@@ -3413,8 +3416,16 @@ git commit -m "feat: add live watchlist sidebar shell and styles"
         volume.textContent = formatVolume(item.volume);
         volume.className = item.volume === null || item.volume === undefined ? 'num empty' : 'num';
 
-        if (item.extendedPrice !== null && item.extendedPrice !== undefined) {
-            el.title = 'Ext ' + priceFmt.format(item.extendedPrice);
+        // Extended-hours price. Blank outside pre/post market rather than repeating
+        // Last — showing the regular-session price under an "Ext" heading would assert
+        // after-hours trading that did not happen.
+        var ext = numCell(el, 'ext');
+        if (item.extendedPrice === null || item.extendedPrice === undefined) {
+            ext.textContent = '—';
+            ext.className = 'num empty';
+        } else {
+            ext.textContent = priceFmt.format(item.extendedPrice);
+            ext.className = 'num';
         }
 
         if (flash && previous !== null && item.last !== null && item.last !== undefined) {
