@@ -204,4 +204,33 @@ public class TwelveDataQuoteProviderTests
 
         Assert.True(quotes.ContainsKey("asts"));
     }
+
+    [Fact]
+    public async Task GetQuotesAsync_reads_volume_and_previous_close()
+    {
+        var provider = Build(StubHttpMessageHandler.Json("""
+            {"symbol":"ASTS","close":"67.61","previous_close":"71.14",
+             "volume":"5030000","timestamp":"1785600000"}
+            """));
+
+        var quotes = await provider.GetQuotesAsync(["ASTS"]);
+
+        Assert.Equal(67.61m, quotes["ASTS"].Price);
+        Assert.Equal(71.14m, quotes["ASTS"].PreviousClose);
+        Assert.Equal(5_030_000L, quotes["ASTS"].Volume);
+    }
+
+    [Fact]
+    public async Task GetQuotesAsync_tolerates_missing_optional_fields()
+    {
+        var provider = Build(StubHttpMessageHandler.Json("""
+            {"symbol":"ASTS","close":"67.61","timestamp":"1785600000"}
+            """));
+
+        var quotes = await provider.GetQuotesAsync(["ASTS"]);
+
+        Assert.Equal(67.61m, quotes["ASTS"].Price);
+        Assert.Null(quotes["ASTS"].PreviousClose);
+        Assert.Null(quotes["ASTS"].Volume);
+    }
 }

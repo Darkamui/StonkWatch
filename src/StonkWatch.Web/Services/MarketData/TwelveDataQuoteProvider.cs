@@ -133,7 +133,28 @@ public class TwelveDataQuoteProvider(
             return false;
         }
 
-        quote = new Quote(symbol.Trim().ToUpperInvariant(), price, ReadTimestamp(element));
+        // Every one of these is optional. A missing or unparseable field must leave the
+        // quote usable rather than discard it — the price is what the alert worker needs,
+        // and the rest only decorate the live sidebar.
+        long? volume = long.TryParse(
+            ReadString(element, "volume"), NumberStyles.Integer, CultureInfo.InvariantCulture, out var v)
+            ? v : null;
+
+        decimal? previousClose = decimal.TryParse(
+            ReadString(element, "previous_close"), NumberStyles.Float, CultureInfo.InvariantCulture, out var pc)
+            ? pc : null;
+
+        decimal? extendedPrice = decimal.TryParse(
+            ReadString(element, "extended_price"), NumberStyles.Float, CultureInfo.InvariantCulture, out var ep)
+            ? ep : null;
+
+        DateTimeOffset? extendedAt = long.TryParse(
+            ReadString(element, "extended_timestamp"), NumberStyles.Integer, CultureInfo.InvariantCulture, out var ex)
+            ? DateTimeOffset.FromUnixTimeSeconds(ex) : null;
+
+        quote = new Quote(
+            symbol.Trim().ToUpperInvariant(), price, ReadTimestamp(element),
+            volume, previousClose, extendedPrice, extendedAt);
         return true;
     }
 

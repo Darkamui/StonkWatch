@@ -1,6 +1,13 @@
 namespace StonkWatch.Web.Services.MarketData;
 
-public record Quote(string Symbol, decimal Price, DateTimeOffset At);
+public record Quote(
+    string Symbol,
+    decimal Price,
+    DateTimeOffset At,
+    long? Volume = null,
+    decimal? PreviousClose = null,
+    decimal? ExtendedPrice = null,
+    DateTimeOffset? ExtendedAt = null);
 
 public interface IQuoteProvider
 {
