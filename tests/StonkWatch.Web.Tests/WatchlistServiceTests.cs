@@ -177,4 +177,153 @@ public class WatchlistServiceTests(PostgresFixture fixture) : IAsyncLifetime
 
         Assert.Equal(["AAA", "BBB"], symbols.OrderBy(s => s));
     }
+
+    [Fact]
+    public async Task UpdateGroupAsync_renames_the_group()
+    {
+        var (service, db) = NewService();
+        await using var _ = db;
+        var group = await service.AddGroupAsync(new CreateWatchlistGroupRequest("SPACE"));
+
+        var updated = await service.UpdateGroupAsync(
+            group.Id, new UpdateWatchlistGroupRequest(Name: "AEROSPACE"));
+
+        Assert.Equal("AEROSPACE", updated!.Name);
+        var groups = await service.ListGroupsAsync();
+        Assert.Equal("AEROSPACE", Assert.Single(groups).Name);
+    }
+
+    [Fact]
+    public async Task UpdateGroupAsync_rejects_a_rename_to_a_name_another_group_already_holds()
+    {
+        var (service, db) = NewService();
+        await using var _ = db;
+        await service.AddGroupAsync(new CreateWatchlistGroupRequest("SPACE"));
+        var pharma = await service.AddGroupAsync(new CreateWatchlistGroupRequest("PHARMA"));
+
+        await Assert.ThrowsAsync<ConflictException>(
+            () => service.UpdateGroupAsync(pharma.Id, new UpdateWatchlistGroupRequest(Name: "space")));
+    }
+
+    [Fact]
+    public async Task UpdateGroupAsync_applies_a_sort_order_change()
+    {
+        var (service, db) = NewService();
+        await using var _ = db;
+        var group = await service.AddGroupAsync(new CreateWatchlistGroupRequest("SPACE"));
+
+        var updated = await service.UpdateGroupAsync(
+            group.Id, new UpdateWatchlistGroupRequest(SortOrder: 7));
+
+        Assert.Equal(7, updated!.SortOrder);
+    }
+
+    [Fact]
+    public async Task UpdateGroupAsync_returns_null_for_an_unknown_id()
+    {
+        var (service, db) = NewService();
+        await using var _ = db;
+
+        var updated = await service.UpdateGroupAsync(
+            Guid.NewGuid(), new UpdateWatchlistGroupRequest(Name: "SPACE"));
+
+        Assert.Null(updated);
+    }
+
+    [Fact]
+    public async Task RemoveGroupAsync_returns_false_for_an_unknown_id()
+    {
+        var (service, db) = NewService();
+        await using var _ = db;
+
+        var removed = await service.RemoveGroupAsync(Guid.NewGuid());
+
+        Assert.False(removed);
+    }
+
+    [Fact]
+    public async Task RemoveItemAsync_removes_the_item_and_returns_true()
+    {
+        var (service, db) = NewService();
+        await using var _ = db;
+        var item = await service.AddItemAsync(new CreateWatchlistItemRequest("ASTS"));
+
+        var removed = await service.RemoveItemAsync(item.Id);
+
+        Assert.True(removed);
+        Assert.Empty(await service.ListItemsAsync());
+    }
+
+    [Fact]
+    public async Task RemoveItemAsync_returns_false_for_an_unknown_id_and_removes_nothing()
+    {
+        var (service, db) = NewService();
+        await using var _ = db;
+        await service.AddItemAsync(new CreateWatchlistItemRequest("ASTS"));
+
+        var removed = await service.RemoveItemAsync(Guid.NewGuid());
+
+        Assert.False(removed);
+        Assert.Single(await service.ListItemsAsync());
+    }
+
+    [Fact]
+    public async Task ListGroupsAsync_returns_groups_ordered_by_sort_order_then_name()
+    {
+        var (service, db) = NewService();
+        await using var _ = db;
+        var space = await service.AddGroupAsync(new CreateWatchlistGroupRequest("SPACE"));
+        var pharma = await service.AddGroupAsync(new CreateWatchlistGroupRequest("PHARMA"));
+        await service.UpdateGroupAsync(space.Id, new UpdateWatchlistGroupRequest(SortOrder: 0));
+        await service.UpdateGroupAsync(pharma.Id, new UpdateWatchlistGroupRequest(SortOrder: 0));
+
+        var groups = await service.ListGroupsAsync();
+
+        Assert.Equal(["PHARMA", "SPACE"], groups.Select(g => g.Name));
+        Assert.All(groups, g => Assert.Equal(0, g.SortOrder));
+        Assert.Contains(groups, g => g.Id == space.Id);
+        Assert.Contains(groups, g => g.Id == pharma.Id);
+    }
+
+    [Fact]
+    public async Task AddItemAsync_rejects_a_GroupId_that_does_not_exist()
+    {
+        var (service, db) = NewService();
+        await using var _ = db;
+
+        await Assert.ThrowsAsync<ValidationException>(() => service.AddItemAsync(
+            new CreateWatchlistItemRequest("ASTS", GroupId: Guid.NewGuid())));
+    }
+
+    [Fact]
+    public async Task UpdateItemAsync_rejects_a_GroupId_that_does_not_exist()
+    {
+        var (service, db) = NewService();
+        await using var _ = db;
+        var item = await service.AddItemAsync(new CreateWatchlistItemRequest("ASTS"));
+
+        await Assert.ThrowsAsync<ValidationException>(() => service.UpdateItemAsync(
+            item.Id, new UpdateWatchlistItemRequest(GroupId: Guid.NewGuid())));
+    }
+
+    [Fact]
+    public async Task ReorderAsync_rejects_an_unknown_item_id()
+    {
+        var (service, db) = NewService();
+        await using var _ = db;
+
+        await Assert.ThrowsAsync<ValidationException>(() => service.ReorderAsync(
+            new ReorderRequest([new ReorderEntry(Guid.NewGuid(), null, 0)])));
+    }
+
+    [Fact]
+    public async Task ReorderAsync_rejects_an_unknown_group_id()
+    {
+        var (service, db) = NewService();
+        await using var _ = db;
+        var item = await service.AddItemAsync(new CreateWatchlistItemRequest("ASTS"));
+
+        await Assert.ThrowsAsync<ValidationException>(() => service.ReorderAsync(
+            new ReorderRequest([new ReorderEntry(item.Id, Guid.NewGuid(), 0)])));
+    }
 }

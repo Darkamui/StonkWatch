@@ -135,7 +135,7 @@ public class WatchlistService(
             throw new ValidationException("Group name is required.");
         }
 
-        if (await db.WatchlistGroups.AnyAsync(g => g.Name.ToUpper() == name.ToUpper(), ct))
+        if (await db.WatchlistGroups.AnyAsync(g => g.Name.ToUpper() == name.ToUpperInvariant(), ct))
         {
             throw new ConflictException($"A group named '{name}' already exists.");
         }
@@ -168,7 +168,7 @@ public class WatchlistService(
         {
             var name = request.Name.Trim();
             if (await db.WatchlistGroups.AnyAsync(
-                    g => g.Id != id && g.Name.ToUpper() == name.ToUpper(), ct))
+                    g => g.Id != id && g.Name.ToUpper() == name.ToUpperInvariant(), ct))
             {
                 throw new ConflictException($"A group named '{name}' already exists.");
             }
