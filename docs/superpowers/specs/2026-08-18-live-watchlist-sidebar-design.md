@@ -21,6 +21,9 @@ existing dark palette.
 - **No multiple named watchlists.** One list with groups. The TradingView list switcher is
   deliberately dropped for a single-user tool.
 - **No per-symbol logos.** No free data source provides them; rows use letter chips.
+- **Rows are not clickable.** Deliberately deferred to a later step. The sidebar ships as a pure
+  market-watching panel with no navigation out of it. Rows should still be built as semantic,
+  focusable elements so adding a click target later is a change to behaviour, not to markup.
 
 ## 1. Provider decision
 
