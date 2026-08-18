@@ -9,6 +9,8 @@ public class StonkWatchDbContext(DbContextOptions<StonkWatchDbContext> options) 
     public DbSet<Alert> Alerts => Set<Alert>();
     public DbSet<ReviewLogEntry> ReviewLogs => Set<ReviewLogEntry>();
     public DbSet<JobRun> JobRuns => Set<JobRun>();
+    public DbSet<WatchlistGroup> WatchlistGroups => Set<WatchlistGroup>();
+    public DbSet<WatchlistItem> WatchlistItems => Set<WatchlistItem>();
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
@@ -84,6 +86,33 @@ public class StonkWatchDbContext(DbContextOptions<StonkWatchDbContext> options) 
             e.Property(r => r.StatusAtReview).HasConversion<string>().HasMaxLength(20);
             e.Property(r => r.ThesisImpact).HasConversion<string>().HasMaxLength(20);
             e.Property(r => r.Price).HasPrecision(18, 4);
+        });
+
+        modelBuilder.Entity<WatchlistGroup>(e =>
+        {
+            e.ToTable("watchlist_groups");
+            e.HasKey(g => g.Id);
+            e.Property(g => g.Name).IsRequired().HasMaxLength(40);
+            e.HasIndex(g => g.Name).IsUnique();
+
+            // Orphan rather than cascade: deleting a group is a re-organisation, and
+            // silently losing the symbols inside it would be a nasty surprise.
+            e.HasMany(g => g.Items)
+                .WithOne(i => i.Group)
+                .HasForeignKey(i => i.GroupId)
+                .OnDelete(DeleteBehavior.SetNull);
+        });
+
+        modelBuilder.Entity<WatchlistItem>(e =>
+        {
+            e.ToTable("watchlist_items");
+            e.HasKey(i => i.Id);
+            e.Property(i => i.Symbol).IsRequired().HasMaxLength(20);
+            e.Property(i => i.DisplayName).HasMaxLength(60);
+
+            // One list, so a symbol appears at most once across every group.
+            e.HasIndex(i => i.Symbol).IsUnique();
+            e.HasIndex(i => new { i.GroupId, i.SortOrder });
         });
     }
 }
