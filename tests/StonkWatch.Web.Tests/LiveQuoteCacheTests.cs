@@ -58,6 +58,97 @@ public class LiveQuoteCacheTests
     }
 
     [Fact]
+    public void ApplySnapshot_advances_the_last_price_on_an_existing_symbol_when_newer()
+    {
+        var cache = NewCache();
+        cache.ApplySnapshot(new Quote("ASTS", 60.00m, Now.AddMinutes(-10)), Session);
+
+        // Later timestamp than the stored quote, so this snapshot should win on Last too —
+        // not just the create path already covered above.
+        cache.ApplySnapshot(new Quote("ASTS", 65.00m, Now.AddMinutes(-5)), Session);
+
+        Assert.Equal(65.00m, cache.Get("ASTS")!.Last);
+    }
+
+    [Fact]
+    public void ApplySnapshot_records_volume_and_extended_fields_on_first_snapshot()
+    {
+        var cache = NewCache();
+
+        cache.ApplySnapshot(
+            new Quote(
+                "ASTS", 60.00m, Now,
+                Volume: 5_030_000, ExtendedPrice: 61.20m, ExtendedAt: Now.AddMinutes(30)),
+            Session);
+
+        var quote = cache.Get("ASTS")!;
+        Assert.Equal(5_030_000L, quote.Volume);
+        Assert.Equal(Now, quote.VolumeAt);
+        Assert.Equal(61.20m, quote.ExtendedPrice);
+        Assert.Equal(Now.AddMinutes(30), quote.ExtendedAt);
+    }
+
+    [Fact]
+    public void ApplySnapshot_advances_volume_and_extended_fields_when_the_snapshot_is_newer()
+    {
+        var cache = NewCache();
+        cache.ApplySnapshot(
+            new Quote(
+                "ASTS", 60.00m, Now,
+                Volume: 5_000_000, ExtendedPrice: 61.00m, ExtendedAt: Now.AddMinutes(30)),
+            Session);
+
+        var later = Now.AddMinutes(10);
+        cache.ApplySnapshot(
+            new Quote(
+                "ASTS", 62.00m, later,
+                Volume: 5_500_000, ExtendedPrice: 62.50m, ExtendedAt: Now.AddMinutes(45)),
+            Session);
+
+        var quote = cache.Get("ASTS")!;
+        Assert.Equal(5_500_000L, quote.Volume);
+        Assert.Equal(later, quote.VolumeAt);
+        Assert.Equal(62.50m, quote.ExtendedPrice);
+        Assert.Equal(Now.AddMinutes(45), quote.ExtendedAt);
+    }
+
+    [Fact]
+    public void ApplySnapshot_does_not_rewind_volume_from_a_stale_snapshot()
+    {
+        var cache = NewCache();
+        cache.ApplySnapshot(new Quote("ASTS", 60.00m, Now, Volume: 5_500_000), Session);
+
+        // An older poll response (a retry, or one overtaken by the next cycle) arrives after
+        // a fresher one. Intraday volume only ever climbs, so it must not go backwards.
+        cache.ApplySnapshot(
+            new Quote("ASTS", 59.00m, Now.AddMinutes(-1), Volume: 5_000_000), Session);
+
+        var quote = cache.Get("ASTS")!;
+        Assert.Equal(5_500_000L, quote.Volume);
+        Assert.Equal(Now, quote.VolumeAt);
+    }
+
+    [Fact]
+    public void ApplySnapshot_ignores_an_extended_price_reported_without_its_own_timestamp()
+    {
+        var cache = NewCache();
+        cache.ApplySnapshot(
+            new Quote("ASTS", 60.00m, Now, ExtendedPrice: 61.00m, ExtendedAt: Now.AddMinutes(30)),
+            Session);
+
+        // TwelveDataQuoteProvider parses ExtendedPrice and ExtendedAt independently, so a
+        // payload can produce one without the other. Taking the price alone would stamp a
+        // fresh price with a stale timestamp — a wrong claim about when it happened.
+        cache.ApplySnapshot(
+            new Quote("ASTS", 63.00m, Now.AddMinutes(10), ExtendedPrice: 65.20m, ExtendedAt: null),
+            Session);
+
+        var quote = cache.Get("ASTS")!;
+        Assert.Equal(61.00m, quote.ExtendedPrice);
+        Assert.Equal(Now.AddMinutes(30), quote.ExtendedAt);
+    }
+
+    [Fact]
     public void ChangePercent_is_computed_from_last_and_previous_close()
     {
         var cache = NewCache();
@@ -97,6 +188,20 @@ public class LiveQuoteCacheTests
 
         // ASTS is from yesterday's session; LLY has never been seen. Both need fetching.
         Assert.Equal(["ASTS", "LLY"], stale.OrderBy(s => s));
+    }
+
+    [Fact]
+    public void Snapshot_returns_every_applied_quote()
+    {
+        var cache = NewCache();
+        cache.ApplyTrade(new Trade("ASTS", 67.61m, Now));
+        cache.ApplyTrade(new Trade("SPCE", 3.10m, Now));
+
+        var snapshot = cache.Snapshot();
+
+        Assert.Equal(2, snapshot.Count);
+        Assert.Contains(snapshot, q => q.Symbol == "ASTS" && q.Last == 67.61m);
+        Assert.Contains(snapshot, q => q.Symbol == "SPCE" && q.Last == 3.10m);
     }
 
     [Fact]
@@ -145,5 +250,150 @@ public class LiveQuoteCacheTests
 
         Assert.True(await enumerator.MoveNextAsync());
         Assert.Equal(68.00m, enumerator.Current.Last);
+    }
+
+    [Fact]
+    public async Task SubscribeAsync_fans_a_trade_out_to_every_subscriber()
+    {
+        var cache = NewCache();
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+
+        var first = cache.SubscribeAsync(cts.Token).GetAsyncEnumerator(cts.Token);
+        var second = cache.SubscribeAsync(cts.Token).GetAsyncEnumerator(cts.Token);
+
+        cache.ApplyTrade(new Trade("ASTS", 67.61m, Now));
+
+        Assert.True(await first.MoveNextAsync());
+        Assert.Equal(67.61m, first.Current.Last);
+        Assert.True(await second.MoveNextAsync());
+        Assert.Equal(67.61m, second.Current.Last);
+    }
+
+    [Fact]
+    public async Task Unsubscribing_removes_the_subscriber()
+    {
+        var cache = NewCache();
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+
+        var enumerator = cache.SubscribeAsync(cts.Token).GetAsyncEnumerator(cts.Token);
+        Assert.Equal(1, cache.SubscriberCount);
+
+        // Get the enumerator into a "suspended mid-iteration" state (rather than disposing
+        // one that never ran) so DisposeAsync deterministically unwinds through the
+        // iterator's try/finally instead of being a no-op on a never-started state machine.
+        cache.ApplyTrade(new Trade("ASTS", 67.61m, Now));
+        Assert.True(await enumerator.MoveNextAsync());
+
+        await enumerator.DisposeAsync();
+
+        Assert.Equal(0, cache.SubscriberCount);
+    }
+
+    [Fact]
+    public async Task Disposing_a_subscription_twice_does_not_throw()
+    {
+        var cache = NewCache();
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+
+        var enumerator = cache.SubscribeAsync(cts.Token).GetAsyncEnumerator(cts.Token);
+        cache.ApplyTrade(new Trade("ASTS", 67.61m, Now));
+        await enumerator.MoveNextAsync();
+
+        await enumerator.DisposeAsync();
+        await enumerator.DisposeAsync();
+
+        Assert.Equal(0, cache.SubscriberCount);
+    }
+
+    [Fact]
+    public async Task ApplyTrade_and_ApplySnapshot_interleaved_from_two_threads_agree_with_Get()
+    {
+        // Regression for the race where install (atomic) and publish (not part of the same
+        // atomic step) could happen in opposite order between two ingest threads: thread A
+        // installs, then is pre-empted before publishing; thread B installs a newer value and
+        // publishes it; thread A resumes and publishes its now-superseded value last. A
+        // subscriber then observes LastAt go backwards — a strictly newer write, once
+        // installed, must never be followed by an older one on the wire.
+        //
+        // Two real OS threads, started together off a Barrier (no Task.Delay anywhere), hammer
+        // the same symbol via ApplyTrade and ApplySnapshot with strictly increasing timestamps.
+        // Several hundred extra, otherwise-unused subscribers are registered first: Publish
+        // fans out to every subscriber in a loop, so with more of them that loop takes
+        // measurably longer, widening the gap between "install" and "publish" that the race
+        // needs to land in. A dedicated reader thread drains the subscription concurrently
+        // with the race (not after it finishes) — the channel is bounded and drops its oldest
+        // entry once full, so a reader that only starts once both racers have joined would see
+        // nothing but the last few hundred frames of a run this size, almost certainly missing
+        // the exact pair that would reveal a reordering. Draining live keeps the backlog small
+        // enough that a violation actually survives to be observed. This combination reproduces
+        // the bug on every run against the pre-fix implementation (verified locally: 8/8), not
+        // on a lucky minority of them.
+        var cache = NewCache();
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+        var enumerator = cache.SubscribeAsync(cts.Token).GetAsyncEnumerator(cts.Token);
+
+        for (var i = 0; i < 500; i++)
+        {
+            cache.SubscribeAsync(cts.Token).GetAsyncEnumerator(cts.Token);
+        }
+
+        const int iterations = 20_000;
+        using var barrier = new Barrier(2);
+
+        var tradeThread = new Thread(() =>
+        {
+            barrier.SignalAndWait();
+            for (var i = 1; i <= iterations; i++)
+            {
+                cache.ApplyTrade(new Trade("ASTS", 100m + i, Now.AddMilliseconds(i)));
+            }
+        });
+        var snapshotThread = new Thread(() =>
+        {
+            barrier.SignalAndWait();
+            for (var i = 1; i <= iterations; i++)
+            {
+                cache.ApplySnapshot(
+                    new Quote("ASTS", 200m + i, Now.AddMilliseconds(i), Volume: i), Session);
+            }
+        });
+
+        // A sentinel trade, applied only after both racers have joined, deterministically
+        // marks the end of the race on the wire: the reader stops as soon as it sees it, so
+        // nothing timing-dependent decides when the assertion window closes.
+        const decimal sentinel = -1m;
+        string? violation = null;
+        var reader = new Thread(() =>
+        {
+            DateTimeOffset? previous = null;
+            while (enumerator.MoveNextAsync().AsTask().GetAwaiter().GetResult())
+            {
+                var quote = enumerator.Current;
+                if (quote.Last == sentinel)
+                {
+                    return;
+                }
+
+                if (quote.LastAt is { } lastAt)
+                {
+                    if (previous is { } prev && lastAt < prev)
+                    {
+                        violation ??= $"LastAt went backwards: {lastAt:O} after {prev:O}";
+                    }
+
+                    previous = lastAt;
+                }
+            }
+        });
+
+        reader.Start();
+        tradeThread.Start();
+        snapshotThread.Start();
+        tradeThread.Join();
+        snapshotThread.Join();
+        cache.ApplyTrade(new Trade("ASTS", sentinel, Now.AddDays(1)));
+        reader.Join();
+
+        Assert.Null(violation);
     }
 }
