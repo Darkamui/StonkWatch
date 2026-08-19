@@ -12,6 +12,7 @@ using StonkWatch.Web.Services;
 using StonkWatch.Web.Services.MarketData;
 using StonkWatch.Web.Services.Monitoring;
 using StonkWatch.Web.Services.Notifications;
+using StonkWatch.Web.Services.Watchlist;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -41,6 +42,17 @@ builder.Services.AddOptions<AppOptions>()
 builder.Services.AddOptions<MonitoringOptions>()
     .Bind(builder.Configuration.GetSection(MonitoringOptions.SectionName))
     .ValidateDataAnnotations();
+
+builder.Services.AddOptions<LiveWatchlistOptions>()
+    .Bind(builder.Configuration.GetSection(LiveWatchlistOptions.SectionName))
+    .ValidateDataAnnotations();
+
+// Both registered unconditionally: the watchlist can be curated with the live feed switched
+// off. The cache is inert without something feeding it, and registering it always means the
+// endpoints take a plain LiveQuoteCache — a minimal-API handler cannot bind an unregistered
+// service parameter, even a nullable one.
+builder.Services.AddScoped<WatchlistService>();
+builder.Services.AddSingleton<LiveQuoteCache>();
 
 var monitoringEnabled = builder.Configuration
     .GetSection(MonitoringOptions.SectionName)
@@ -135,6 +147,14 @@ builder.Services.AddAuthorization(options =>
     options.AddPolicy("ApiKey", policy => policy
         .AddAuthenticationSchemes(ApiKeyAuthenticationHandler.SchemeName)
         .RequireAuthenticatedUser());
+
+    // The sidebar is fetched by the browser with the session cookie, but the same routes
+    // should stay usable from a script with a key. Both schemes, either one sufficient.
+    options.AddPolicy("CookieOrApiKey", policy => policy
+        .AddAuthenticationSchemes(
+            CookieAuthenticationDefaults.AuthenticationScheme,
+            ApiKeyAuthenticationHandler.SchemeName)
+        .RequireAuthenticatedUser());
 });
 
 var app = builder.Build();
@@ -185,6 +205,10 @@ app.MapHealthChecks("/healthz").AllowAnonymous();
 app.MapRazorPages();
 app.MapCandidateEndpoints();
 app.MapAlertEndpoints();
+app.MapWatchlistEndpoints();
 app.MapMcp("/mcp").RequireAuthorization("ApiKey");
 
 app.Run();
+
+// Exposed so the test project can host the app through WebApplicationFactory.
+public partial class Program;

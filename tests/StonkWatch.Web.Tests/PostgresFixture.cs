@@ -21,6 +21,9 @@ public sealed class PostgresFixture : IAsyncLifetime
         await db.Database.MigrateAsync();
     }
 
+    /// <summary>The test container's connection string, for hosting the app in-process.</summary>
+    public string ConnectionString => _container.GetConnectionString();
+
     public StonkWatchDbContext CreateContext()
     {
         var options = new DbContextOptionsBuilder<StonkWatchDbContext>()

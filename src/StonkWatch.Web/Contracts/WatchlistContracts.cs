@@ -26,3 +26,21 @@ public record UpdateWatchlistGroupRequest(string? Name = null, int? SortOrder = 
 public record ReorderEntry(Guid Id, Guid? GroupId, int SortOrder);
 
 public record ReorderRequest(IReadOnlyList<ReorderEntry> Items);
+
+/// <summary>One rendered row: the stored item joined to whatever the cache currently knows.</summary>
+public record WatchlistRowDto(
+    Guid Id,
+    Guid? GroupId,
+    string Symbol,
+    string Label,
+    int SortOrder,
+    decimal? Last,
+    decimal? ChangePercent,
+    long? Volume,
+    decimal? ExtendedPrice,
+    DateTimeOffset? LastAt);
+
+public record WatchlistViewDto(
+    IReadOnlyList<WatchlistGroupDto> Groups,
+    IReadOnlyList<WatchlistRowDto> Rows,
+    DateTimeOffset ServerTime);
