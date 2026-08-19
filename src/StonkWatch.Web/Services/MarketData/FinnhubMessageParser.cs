@@ -15,6 +15,10 @@ namespace StonkWatch.Web.Services.MarketData;
 /// </remarks>
 public static class FinnhubMessageParser
 {
+    // The valid range DateTimeOffset.FromUnixTimeMilliseconds will accept without throwing.
+    private static readonly long MinUnixMilliseconds = DateTimeOffset.MinValue.ToUnixTimeMilliseconds();
+    private static readonly long MaxUnixMilliseconds = DateTimeOffset.MaxValue.ToUnixTimeMilliseconds();
+
     public static IReadOnlyList<Trade> ParseTrades(string payload)
     {
         if (string.IsNullOrWhiteSpace(payload))
@@ -67,16 +71,23 @@ public static class FinnhubMessageParser
             || s.GetString() is not { Length: > 0 } symbol
             || !element.TryGetProperty("p", out var p)
             || p.ValueKind != JsonValueKind.Number
+            || !p.TryGetDecimal(out var price)
             || !element.TryGetProperty("t", out var t)
-            || t.ValueKind != JsonValueKind.Number)
+            || t.ValueKind != JsonValueKind.Number
+            || !t.TryGetInt64(out var unixMilliseconds)
+            || unixMilliseconds < MinUnixMilliseconds
+            || unixMilliseconds > MaxUnixMilliseconds)
         {
+            // Never throw here: an untrusted wire payload with an out-of-range price (e.g.
+            // 1e999), a fractional timestamp, or a timestamp outside what DateTimeOffset can
+            // represent must drop just this one trade, not the whole frame or the connection.
             return false;
         }
 
         trade = new Trade(
             symbol.Trim().ToUpperInvariant(),
-            p.GetDecimal(),
-            DateTimeOffset.FromUnixTimeMilliseconds(t.GetInt64()));
+            price,
+            DateTimeOffset.FromUnixTimeMilliseconds(unixMilliseconds));
         return true;
     }
 }

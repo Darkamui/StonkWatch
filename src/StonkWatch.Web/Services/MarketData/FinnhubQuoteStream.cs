@@ -26,6 +26,7 @@ public sealed class FinnhubQuoteStream(
     private readonly SemaphoreSlim _gate = new(1, 1);
     private HashSet<string> _symbols = new(StringComparer.OrdinalIgnoreCase);
     private IWebSocketConnection? _connection;
+    private int _enumerating;
 
     public async Task SetSymbolsAsync(
         IReadOnlyCollection<string> symbols, CancellationToken ct = default)
@@ -48,13 +49,26 @@ public sealed class FinnhubQuoteStream(
                 return;
             }
 
-            foreach (var symbol in added)
+            try
             {
-                await SendAsync(connection, "subscribe", symbol, ct);
+                foreach (var symbol in added)
+                {
+                    await SendAsync(connection, "subscribe", symbol, ct);
+                }
+                foreach (var symbol in removed)
+                {
+                    await SendAsync(connection, "unsubscribe", symbol, ct);
+                }
             }
-            foreach (var symbol in removed)
+            catch (Exception ex) when (ex is not OperationCanceledException)
             {
-                await SendAsync(connection, "unsubscribe", symbol, ct);
+                // The socket can die between the last read and this write. _symbols is
+                // already updated above, so the next connect's replay in RunConnectionAsync
+                // sends the correct set from scratch — there is nothing more to do here than
+                // let the caller's update succeed instead of throwing a transport exception
+                // out of a page or endpoint that has no idea how to map it.
+                logger.LogWarning(
+                    ex, "Failed to update Finnhub subscriptions on a live connection; will resync on reconnect");
             }
         }
         finally
@@ -66,6 +80,15 @@ public sealed class FinnhubQuoteStream(
     public async IAsyncEnumerable<Trade> ReadAllAsync(
         [EnumeratorCancellation] CancellationToken ct = default)
     {
+        // Single-consumer by design: one Finnhub socket, one shared trade channel. A second
+        // concurrent enumeration would start a second pump and a second socket, and the two
+        // would silently split the trades between them (see IQuoteStream.ReadAllAsync).
+        if (Interlocked.CompareExchange(ref _enumerating, 1, 0) != 0)
+        {
+            throw new InvalidOperationException(
+                "FinnhubQuoteStream.ReadAllAsync supports only one concurrent consumer.");
+        }
+
         var pump = Task.Run(() => PumpAsync(ct), ct);
         try
         {
@@ -76,6 +99,7 @@ public sealed class FinnhubQuoteStream(
         }
         finally
         {
+            Volatile.Write(ref _enumerating, 0);
             await pump.WaitAsync(TimeSpan.FromSeconds(5), timeProvider, CancellationToken.None)
                 .ContinueWith(_ => { }, TaskScheduler.Default);
         }
@@ -92,10 +116,20 @@ public sealed class FinnhubQuoteStream(
 
         while (!ct.IsCancellationRequested)
         {
+            var connectedAt = timeProvider.GetUtcNow();
             try
             {
                 await RunConnectionAsync(ct);
-                backoff = MinBackoff;   // a clean close is not a failure; retry immediately
+
+                // A session that stayed up for a while is healthy: reset the backoff to the
+                // floor. A session that never really got going — Finnhub accepts and then
+                // immediately hangs up once a connection or symbol limit is hit — must not
+                // reset it, or a bad key or a hit limit turns into a tight reconnect loop
+                // instead of backing off.
+                if (timeProvider.GetUtcNow() - connectedAt >= MinBackoff)
+                {
+                    backoff = MinBackoff;
+                }
             }
             catch (OperationCanceledException) when (ct.IsCancellationRequested)
             {
@@ -109,6 +143,8 @@ public sealed class FinnhubQuoteStream(
 
             try
             {
+                // Always paced by backoff, even after a clean close — an instantly-hanging-up
+                // peer is exactly the case above that must not spin unthrottled.
                 await Task.Delay(backoff, timeProvider, ct);
             }
             catch (OperationCanceledException)
@@ -130,23 +166,25 @@ public sealed class FinnhubQuoteStream(
         await connection.ConnectAsync(
             new Uri($"{_options.WebSocketUrl}?token={Uri.EscapeDataString(_options.ApiKey)}"), ct);
 
-        // Subscriptions are per-connection, so the full set is replayed on every connect.
-        await _gate.WaitAsync(ct);
         try
         {
-            _connection = connection;
-            foreach (var symbol in _symbols)
+            // Subscriptions are per-connection, so the full set is replayed on every connect,
+            // held under the gate so a concurrent SetSymbolsAsync can't interleave its own
+            // subscribe/unsubscribe with this replay.
+            await _gate.WaitAsync(ct);
+            try
             {
-                await SendAsync(connection, "subscribe", symbol, ct);
+                _connection = connection;
+                foreach (var symbol in _symbols)
+                {
+                    await SendAsync(connection, "subscribe", symbol, ct);
+                }
             }
-        }
-        finally
-        {
-            _gate.Release();
-        }
+            finally
+            {
+                _gate.Release();
+            }
 
-        try
-        {
             while (!ct.IsCancellationRequested)
             {
                 var frame = await connection.ReceiveAsync(ct);
@@ -163,6 +201,11 @@ public sealed class FinnhubQuoteStream(
         }
         finally
         {
+            // Whatever happened above — clean close, cancellation, or a failed send during
+            // the subscribe replay — this connection must stop being the "live" one. Leaving
+            // a stale pointer here after `await using` disposes the socket is exactly the bug
+            // this closes: the next SetSymbolsAsync would otherwise try to write to a dead
+            // connection instead of quietly waiting for the reconnect to replay real state.
             await _gate.WaitAsync(CancellationToken.None);
             try
             {

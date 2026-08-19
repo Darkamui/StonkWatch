@@ -36,6 +36,17 @@ public class FinnhubMessageParserTests
     [InlineData("""{"type":"error","msg":"Invalid symbol"}""")]
     [InlineData("not json at all")]
     [InlineData("")]
+    // A non-"trade" type must be rejected even when it happens to carry a "data" array that
+    // looks like trades — the type check is a real guard, not incidental.
+    [InlineData("""{"type":"ping","data":[{"s":"ASTS","p":67.61,"t":1787059800000}]}""")]
+    // "p" as a string: the ValueKind guard must reject it before any numeric conversion runs.
+    [InlineData("""{"type":"trade","data":[{"s":"ASTS","p":"67.61","t":1787059800000}]}""")]
+    // A price outside decimal's range must be dropped, not thrown out of the read loop.
+    [InlineData("""{"type":"trade","data":[{"s":"ASTS","p":1e999,"t":1787059800000}]}""")]
+    // A fractional timestamp isn't a valid Unix millisecond count.
+    [InlineData("""{"type":"trade","data":[{"s":"ASTS","p":67.61,"t":1787059800000.5}]}""")]
+    // A timestamp outside what DateTimeOffset can represent must not throw either.
+    [InlineData("""{"type":"trade","data":[{"s":"ASTS","p":67.61,"t":999999999999999999}]}""")]
     public void ParseTrades_returns_empty_for_anything_that_is_not_a_trade(string payload)
     {
         // The read loop must never throw on an unexpected frame; one bad message
@@ -49,6 +60,19 @@ public class FinnhubMessageParserTests
         var trades = FinnhubMessageParser.ParseTrades("""
             {"type":"trade","data":[
               {"s":"ASTS","t":1787059800000},
+              {"s":"SPCE","p":3.18,"t":1787059801000}]}
+            """);
+
+        var trade = Assert.Single(trades);
+        Assert.Equal("SPCE", trade.Symbol);
+    }
+
+    [Fact]
+    public void ParseTrades_skips_an_entry_with_an_out_of_range_numeric_field_but_keeps_the_rest()
+    {
+        var trades = FinnhubMessageParser.ParseTrades("""
+            {"type":"trade","data":[
+              {"s":"ASTS","p":1e999,"t":1787059800000},
               {"s":"SPCE","p":3.18,"t":1787059801000}]}
             """);
 
