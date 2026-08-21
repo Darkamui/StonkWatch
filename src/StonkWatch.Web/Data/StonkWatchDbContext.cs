@@ -11,6 +11,7 @@ public class StonkWatchDbContext(DbContextOptions<StonkWatchDbContext> options) 
     public DbSet<JobRun> JobRuns => Set<JobRun>();
     public DbSet<WatchlistGroup> WatchlistGroups => Set<WatchlistGroup>();
     public DbSet<WatchlistItem> WatchlistItems => Set<WatchlistItem>();
+    public DbSet<QuestradeToken> QuestradeTokens => Set<QuestradeToken>();
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
@@ -113,6 +114,16 @@ public class StonkWatchDbContext(DbContextOptions<StonkWatchDbContext> options) 
             // One list, so a symbol appears at most once across every group.
             e.HasIndex(i => i.Symbol).IsUnique();
             e.HasIndex(i => new { i.GroupId, i.SortOrder });
+        });
+
+        modelBuilder.Entity<QuestradeToken>(e =>
+        {
+            // The check constraint is the point: a second row is impossible at the database
+            // level, so no amount of concurrency can produce two competing refresh tokens.
+            e.ToTable("questrade_token", t => t.HasCheckConstraint("ck_questrade_token_singleton", "id = 1"));
+            e.HasKey(t => t.Id);
+            e.Property(t => t.Id).ValueGeneratedNever();
+            e.Property(t => t.ProtectedRefreshToken).IsRequired();
         });
     }
 }
