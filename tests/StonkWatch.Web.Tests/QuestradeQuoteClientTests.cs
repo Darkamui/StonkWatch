@@ -161,9 +161,14 @@ public class QuestradeQuoteClientTests
 
         var handler401 = new SequencedHandler((_, _) => Respond("", HttpStatusCode.Unauthorized));
         var client401 = NewClient(handler401, new RecordingAuthenticator(secret), log);
-        await Assert.ThrowsAsync<HttpRequestException>(() => client401.GetQuotesAsync([1]));
+        var ex = await Assert.ThrowsAsync<HttpRequestException>(() => client401.GetQuotesAsync([1]));
 
         Assert.DoesNotContain(secret, log.AllText, StringComparison.Ordinal);
+        // The exception message itself is a leak vector distinct from the log: it propagates
+        // out of GetQuotesAsync, past the job's reauth-only catch, straight into the worker's
+        // logger.LogError(ex, ...) — a future edit that adds token context to this message
+        // would ship a secret leak with a green suite unless the message itself is pinned too.
+        Assert.DoesNotContain(secret, ex.ToString(), StringComparison.Ordinal);
     }
 
     [Fact]
