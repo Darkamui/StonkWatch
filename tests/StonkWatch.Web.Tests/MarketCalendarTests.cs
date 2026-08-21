@@ -125,4 +125,28 @@ public class MarketCalendarTests
         Assert.DoesNotContain("weekend", reason);
         Assert.DoesNotContain("holiday", reason);
     }
+
+    // ---------- SessionDate ----------
+
+    [Fact]
+    public void SessionDate_returns_the_eastern_calendar_date()
+    {
+        Assert.Equal(new DateOnly(2026, 7, 31), MarketCalendar.SessionDate(Edt(2026, 7, 31, 12)));
+    }
+
+    [Fact]
+    public void SessionDate_uses_eastern_not_utc_for_late_evening_after_hours_trading()
+    {
+        // 21:00 EDT on 31 July is 01:00 UTC on 1 August. A UTC date would report the wrong
+        // session for after-hours trading, which is exactly when this matters.
+        var lateEvening = Edt(2026, 7, 31, 21);
+
+        Assert.Equal(new DateOnly(2026, 7, 31), MarketCalendar.SessionDate(lateEvening));
+    }
+
+    [Fact]
+    public void SessionDate_tracks_eastern_time_through_the_winter()
+    {
+        Assert.Equal(new DateOnly(2027, 1, 11), MarketCalendar.SessionDate(Est(2027, 1, 11, 9, 30)));
+    }
 }

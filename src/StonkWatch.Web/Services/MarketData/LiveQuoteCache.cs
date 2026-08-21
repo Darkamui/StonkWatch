@@ -44,7 +44,7 @@ public sealed class LiveQuoteCache(TimeProvider timeProvider)
     /// <c>TryWrite</c> on a leaked, completed channel just returns <see langword="false"/>,
     /// silently, so a leak has no externally visible effect except growing this count.
     /// </summary>
-    internal int SubscriberCount
+    public int SubscriberCount
     {
         get
         {

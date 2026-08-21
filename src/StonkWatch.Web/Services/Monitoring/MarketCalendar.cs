@@ -64,6 +64,14 @@ public static class MarketCalendar
         return timeOfDay >= Open && timeOfDay < Close;
     }
 
+    /// <summary>
+    /// The Eastern calendar date of <paramref name="instant"/>. Used to key a session's
+    /// previous close: a UTC date would be wrong for anything after 19:00 ET, which is
+    /// exactly when after-hours trading happens.
+    /// </summary>
+    public static DateOnly SessionDate(DateTimeOffset instant) =>
+        DateOnly.FromDateTime(TimeZoneInfo.ConvertTime(instant, Eastern).Date);
+
     /// <summary>Human-readable reason a tick did nothing, for the job_runs record.</summary>
     public static string DescribeClosed(DateTimeOffset instant)
     {

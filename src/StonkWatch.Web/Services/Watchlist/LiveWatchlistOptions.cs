@@ -17,12 +17,15 @@ public class LiveWatchlistOptions
     public int SnapshotMinutes { get; set; } = 10;
 
     /// <summary>
-    /// Finnhub's free tier streams at most 50 symbols. Exceeding it does not error upstream —
-    /// the extra subscriptions are silently ignored — so the cap is enforced here instead,
-    /// where it can be reported.
+    /// One batched Questrade quotes call covers the whole watchlist, so the cap isn't about
+    /// staying under a request limit — 50 keeps both the request and the sidebar itself sane.
     /// </summary>
     [Range(1, 500)]
     public int MaxSymbols { get; set; } = 50;
+
+    /// <summary>How often the watchlist sidebar polls Questrade for fresh quotes.</summary>
+    [Range(1, 60)]
+    public int PollSeconds { get; set; } = 3;
 
     /// <summary>
     /// How long the SSE stream can go without a real data event before it sends a
