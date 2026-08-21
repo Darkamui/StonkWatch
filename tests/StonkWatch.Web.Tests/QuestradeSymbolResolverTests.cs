@@ -1,4 +1,5 @@
 using System.Net;
+using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Time.Testing;
 using StonkWatch.Web.Services.MarketData.Questrade;
@@ -70,11 +71,16 @@ public class QuestradeSymbolResolverTests
     private sealed class CountingAuthenticator(QuestradeSession session) : IQuestradeAuthenticator
     {
         private int _invalidateCalls;
+        private int _sessionCalls;
 
         public int InvalidateCalls => Volatile.Read(ref _invalidateCalls);
+        public int SessionCalls => Volatile.Read(ref _sessionCalls);
 
-        public Task<QuestradeSession> GetSessionAsync(CancellationToken ct = default) =>
-            Task.FromResult(session);
+        public Task<QuestradeSession> GetSessionAsync(CancellationToken ct = default)
+        {
+            Interlocked.Increment(ref _sessionCalls);
+            return Task.FromResult(session);
+        }
 
         public void Invalidate() => Interlocked.Increment(ref _invalidateCalls);
     }
@@ -92,9 +98,10 @@ public class QuestradeSymbolResolverTests
     }
 
     private static QuestradeSymbolResolver NewResolver(
-        HttpMessageHandler handler, TimeProvider? time = null, IQuestradeAuthenticator? authenticator = null) =>
+        HttpMessageHandler handler, TimeProvider? time = null, IQuestradeAuthenticator? authenticator = null,
+        ILogger<QuestradeSymbolResolver>? logger = null) =>
         new(new HttpClient(handler), authenticator ?? new FixedAuthenticator(Session), time ?? new FakeTimeProvider(Start),
-            NullLogger<QuestradeSymbolResolver>.Instance);
+            logger ?? NullLogger<QuestradeSymbolResolver>.Instance);
 
     // ---- tests --------------------------------------------------------------------------
 
@@ -257,11 +264,15 @@ public class QuestradeSymbolResolverTests
     }
 
     [Fact]
-    public async Task A_mid_batch_401_does_not_blacklist_every_remaining_ticker()
+    public async Task Each_ticker_gets_its_own_session_fetch_so_one_401_does_not_starve_the_rest_of_the_batch()
     {
         // The old bug fetched one session before the whole lookup loop, so a token that went
         // stale partway through a cold-start batch 401'd (and negative-cached) every ticker
-        // still to come. Each lookup must get its own retry-protected session.
+        // still to come. Both tickers resolving isn't proof of that by itself — this test
+        // (previously named A_mid_batch_401_does_not_blacklist_every_remaining_ticker) only
+        // ever asserted the outcome, never the mechanism its name claimed. Assert the session
+        // fetch count directly: a batch-wide shared session (the old bug) would fetch exactly
+        // once for both tickers; per-lookup sessions fetch once per attempt.
         var handler = new SequencedHandler((n, request) =>
         {
             // AAPL 401s once, then succeeds on retry; MSFT must not be swept up in that.
@@ -281,5 +292,76 @@ public class QuestradeSymbolResolverTests
 
         Assert.Equal(2, result["AAPL"]);
         Assert.Equal(3, result["MSFT"]);
+        // 2 session fetches for AAPL's own invalidate-and-retry (before and after Invalidate),
+        // 1 more for MSFT's independent lookup.
+        Assert.Equal(3, auth.SessionCalls);
+    }
+
+    // ---------- fix round 2: N-1, a per-batch circuit breaker on a persistent 401 ----------
+
+    [Fact]
+    public async Task A_persistent_401_abandons_the_rest_of_the_batch_instead_of_retrying_every_ticker()
+    {
+        // Without a circuit breaker, a 50-ticker batch against a token Questrade keeps
+        // rejecting retries invalidate-and-retry-once independently for every ticker: 100
+        // requests, 100 session fetches, 50 refresh-token rotations, every 3 seconds, forever.
+        // The fix: the first persistent-401 TransientFailure ends the batch.
+        var handler = new SequencedHandler((_, _) => Respond("", HttpStatusCode.Unauthorized));
+        var auth = new CountingAuthenticator(Session);
+        var resolver = NewResolver(handler, authenticator: auth);
+
+        var tickers = Enumerable.Range(0, 50).Select(i => $"T{i:D2}").ToList();
+        var result = await resolver.ResolveAsync(tickers);
+
+        Assert.Empty(result);
+        // Bounded: one ticker's invalidate-and-retry-once, then the batch stops. Not the
+        // 100/100/50 shape the unbounded per-ticker retry produced.
+        Assert.Equal(2, handler.Requests.Count);
+        Assert.Equal(2, auth.SessionCalls);
+        Assert.Equal(1, auth.InvalidateCalls);
+    }
+
+    // ---------- fix round 2: gap 1, a non-401 failure must not be read as "not found" ----------
+
+    [Fact]
+    public async Task A_500_is_not_negative_cached_either()
+    {
+        // Same class of bug M-1 was, on a different status code: a transient failure read as
+        // evidence of absence. A 500 doesn't take the invalidate-and-retry path (only 401
+        // does), so this pins the other branch — QuestradeHttp.SendWithRetryAsync returning
+        // null for any other non-success status must still map to TransientFailure, not
+        // NotFound.
+        var handler = new RecordingHandler(_ => Respond("", HttpStatusCode.InternalServerError));
+        var time = new FakeTimeProvider(Start);
+        var resolver = NewResolver(handler, time);
+
+        var first = await resolver.ResolveAsync(["AAPL"]);
+        Assert.DoesNotContain("AAPL", first.Keys);
+        Assert.Single(handler.Requests);
+
+        // If this had been negative-cached, a second call one minute later (well inside the
+        // 30-minute window) would still be silently skipped instead of hitting the network.
+        time.Advance(TimeSpan.FromMinutes(1));
+        var second = await resolver.ResolveAsync(["AAPL"]);
+        Assert.DoesNotContain("AAPL", second.Keys);
+        Assert.Equal(2, handler.Requests.Count);
+    }
+
+    // ---------- fix round 2: gap 3, the new LogWarning needs the same leak guard as I-3 -------
+
+    [Fact]
+    public async Task The_persistent_401_warning_never_contains_the_access_token()
+    {
+        var secret = "SECRET-ACCESS-DO-NOT-LEAK-4f2a";
+        var session = new QuestradeSession(secret, "https://api01.iq.questrade.com/", DateTimeOffset.MaxValue);
+        var handler = new SequencedHandler((_, _) => Respond("", HttpStatusCode.Unauthorized));
+        var auth = new CountingAuthenticator(session);
+        var log = new CapturingLogger<QuestradeSymbolResolver>();
+        var resolver = NewResolver(handler, authenticator: auth, logger: log);
+
+        await resolver.ResolveAsync(["AAPL", "MSFT"]);
+
+        Assert.NotEmpty(log.AtLevel(LogLevel.Warning));
+        Assert.DoesNotContain(secret, log.AllText, StringComparison.Ordinal);
     }
 }

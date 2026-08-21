@@ -46,13 +46,18 @@ public class QuestradeSymbolResolver(
 
     /// <summary>
     /// A search either resolves, genuinely finds no matching US listing (safe to negative-cache),
-    /// or fails transiently (never safe to negative-cache — the next tick gets a fresh attempt).
+    /// fails transiently on a non-auth status (never safe to negative-cache — the next tick gets
+    /// a fresh attempt), or fails on a persistent 401 even after invalidate-and-retry-once — the
+    /// one outcome that isn't just this ticker's problem: a token Questrade keeps rejecting will
+    /// reject every ticker still to come the same way, so <see cref="ResolveAsync"/> stops
+    /// working through the batch rather than rotating the refresh token once per ticker.
     /// </summary>
     private enum LookupOutcome
     {
         Resolved,
         NotFound,
-        TransientFailure
+        TransientFailure,
+        PersistentAuthFailure
     }
 
     private readonly record struct LookupResult(LookupOutcome Outcome, int Id = 0)
@@ -60,6 +65,7 @@ public class QuestradeSymbolResolver(
         public static LookupResult Resolved(int id) => new(LookupOutcome.Resolved, id);
         public static readonly LookupResult NotFound = new(LookupOutcome.NotFound);
         public static readonly LookupResult TransientFailure = new(LookupOutcome.TransientFailure);
+        public static readonly LookupResult PersistentAuthFailure = new(LookupOutcome.PersistentAuthFailure);
     }
 
     public async Task<IReadOnlyDictionary<string, int>> ResolveAsync(
@@ -96,9 +102,10 @@ public class QuestradeSymbolResolver(
         // and its own invalidate-and-retry-once policy via QuestradeHttp, rather than one
         // session shared across the whole loop — otherwise a token that goes stale partway
         // through a cold-start batch would 401 every ticker still to come.
-        foreach (var ticker in toLookup)
+        for (var i = 0; i < toLookup.Count; i++)
         {
             ct.ThrowIfCancellationRequested();
+            var ticker = toLookup[i];
 
             var lookup = await LookupAsync(ticker, ct);
             switch (lookup.Outcome)
@@ -121,6 +128,20 @@ public class QuestradeSymbolResolver(
                     // seconds later) retries naturally instead of waiting out a 30-minute
                     // blackout.
                     break;
+
+                case LookupOutcome.PersistentAuthFailure:
+                    // A token Questrade rejects twice in a row for one ticker will reject every
+                    // other ticker the same way — a per-batch circuit breaker, not a per-ticker
+                    // one. Without it, a 50-symbol watchlist against a stuck token would rotate
+                    // the refresh token 50 times per tick, every 3 seconds, forever. One
+                    // Warning, naming the ticker and how many were abandoned; no token value.
+                    var remaining = toLookup.Count - i - 1;
+                    logger.LogWarning(
+                        "Questrade rejected the access token twice while searching for "
+                        + "{Ticker}; abandoning the remaining {Remaining} ticker(s) in this "
+                        + "batch rather than retrying every one of them individually.",
+                        ticker, remaining);
+                    return result;
             }
         }
 
@@ -138,16 +159,15 @@ public class QuestradeSymbolResolver(
                 http, authenticator, logger, path,
                 session => $"{session.ApiServer}{path}?prefix={Uri.EscapeDataString(ticker)}", ct);
         }
-        catch (HttpRequestException ex)
+        catch (HttpRequestException)
         {
             // QuestradeHttp throws when a second 401 follows the invalidate-and-retry — a
-            // persistently stale token, not evidence this ticker doesn't exist. Unlike the
-            // quote client (one batched call, nothing to isolate), the resolver processes
-            // tickers one at a time in a loop: a hard auth failure must cost this ticker one
-            // tick, not the rest of the batch. The message is token-free (QuestradeHttp names
-            // only the path), so logging it is safe.
-            logger.LogWarning(ex, "Symbol search for {Ticker} could not authenticate", ticker);
-            return LookupResult.TransientFailure;
+            // persistently stale token, not evidence this ticker doesn't exist, and not just
+            // this ticker's problem either: the same token will fail the same way for
+            // everything else still queued. ResolveAsync logs once for the whole batch and
+            // stops, rather than every LookupAsync call logging (and every ticker paying) its
+            // own invalidate-and-retry.
+            return LookupResult.PersistentAuthFailure;
         }
 
         using var _ = response;
