@@ -1,4 +1,5 @@
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using Microsoft.Extensions.Time.Testing;
 using StonkWatch.Web.Contracts;
@@ -179,25 +180,30 @@ public class WatchlistServiceTests(PostgresFixture fixture) : IAsyncLifetime
     }
 
     [Fact]
-    public async Task ListSymbolsAsync_orders_by_sort_order_like_ListItemsAsync()
+    public async Task ListSymbolsAsync_query_carries_an_ORDER_BY_clause()
     {
         // LiveWatchlistPollJob.MaxSymbols takes the first N of whatever this returns, so an
         // arbitrary storage order would make "the first N" undefined and let the polled set
         // change between ticks. Ordering must match ListItemsAsync's own SortOrder-then-Symbol.
-        var (service, db) = NewService();
-        await using var _ = db;
-        var group = await service.AddGroupAsync(new CreateWatchlistGroupRequest("SPACE"));
-        var a = await service.AddItemAsync(new CreateWatchlistItemRequest("AAA"));
-        var b = await service.AddItemAsync(new CreateWatchlistItemRequest("BBB"));
+        //
+        // Asserting on the *returned row order* was tried first and was flaky: Postgres row
+        // order absent an ORDER BY is an implementation detail (heap/physical order), not
+        // something SQL guarantees, and with only two rows it coincidentally matched the
+        // expected order about as often as not (2 green / 1 red across three runs with the
+        // production OrderBy removed). Asserting on the generated SQL instead is deterministic
+        // regardless of how Postgres happens to store two rows on a given run.
+        var sqlLog = new List<string>();
+        var options = new DbContextOptionsBuilder<StonkWatchDbContext>()
+            .UseNpgsql(fixture.ConnectionString)
+            .UseSnakeCaseNamingConvention()
+            .LogTo(sqlLog.Add, LogLevel.Information)
+            .Options;
+        await using var db = new StonkWatchDbContext(options);
+        var service = new WatchlistService(db, _time, Options.Create(new LiveWatchlistOptions()));
 
-        await service.ReorderAsync(new ReorderRequest([
-            new ReorderEntry(b.Id, group.Id, 0),
-            new ReorderEntry(a.Id, group.Id, 1),
-        ]));
+        await service.ListSymbolsAsync();
 
-        var symbols = await service.ListSymbolsAsync();
-
-        Assert.Equal(["BBB", "AAA"], symbols);
+        Assert.Contains(sqlLog, line => line.Contains("ORDER BY", StringComparison.Ordinal));
     }
 
     [Fact]
