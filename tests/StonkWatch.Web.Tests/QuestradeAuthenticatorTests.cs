@@ -15,11 +15,22 @@ namespace StonkWatch.Web.Tests;
 /// and "stored", two concurrent refreshes, and an expired token — plus the rule that no token
 /// value ever reaches a log or an exception message.
 /// </summary>
-public class QuestradeAuthenticatorTests
+public class QuestradeAuthenticatorTests : IDisposable
 {
     private static readonly DateTimeOffset Start = new(2026, 8, 19, 13, 30, 0, TimeSpan.Zero);
 
     private readonly FakeTimeProvider _time = new(Start);
+
+    /// <summary>Everything <see cref="NewAuthenticator"/> builds, torn down with the test.</summary>
+    private readonly List<IDisposable> _disposables = [];
+
+    public void Dispose()
+    {
+        foreach (var disposable in _disposables)
+        {
+            disposable.Dispose();
+        }
+    }
 
     // ---- test doubles -------------------------------------------------------------------
 
@@ -94,33 +105,6 @@ public class QuestradeAuthenticatorTests
         }
     }
 
-    private sealed class CapturingLogger<T> : ILogger<T>
-    {
-        private readonly Lock _sync = new();
-        public List<string> Lines { get; } = [];
-
-        public string AllText
-        {
-            get { lock (_sync) { return string.Join("\n", Lines); } }
-        }
-
-        IDisposable? ILogger.BeginScope<TState>(TState state) => null;
-
-        public bool IsEnabled(LogLevel logLevel) => true;
-
-        public void Log<TState>(
-            LogLevel logLevel, EventId eventId, TState state, Exception? exception,
-            Func<TState, Exception?, string> formatter)
-        {
-            lock (_sync)
-            {
-                // Both the rendered message and the raw state: a structured argument can
-                // carry a value the format string never names.
-                Lines.Add($"{logLevel}: {formatter(state, exception)} | {state} | {exception}");
-            }
-        }
-    }
-
     // ---- helpers ------------------------------------------------------------------------
 
     private static string TokenJson(
@@ -142,7 +126,14 @@ public class QuestradeAuthenticatorTests
     {
         var services = new ServiceCollection();
         services.AddSingleton(store);
-        var scopeFactory = services.BuildServiceProvider().GetRequiredService<IServiceScopeFactory>();
+        var provider = services.BuildServiceProvider();
+        _disposables.Add(provider);
+
+        var scopeFactory = provider.GetRequiredService<IServiceScopeFactory>();
+
+        // Disposing the client disposes the handler with it.
+        var client = new HttpClient(handler);
+        _disposables.Add(client);
 
         var options = Options.Create(new QuestradeOptions
         {
@@ -152,7 +143,7 @@ public class QuestradeAuthenticatorTests
         });
 
         return new QuestradeAuthenticator(
-            new HttpClient(handler), scopeFactory, options, _time,
+            client, scopeFactory, options, _time,
             logger ?? NullLogger<QuestradeAuthenticator>.Instance);
     }
 
@@ -230,17 +221,106 @@ public class QuestradeAuthenticatorTests
     {
         // The other half of failure mode 1: if the save fails, caching the session would
         // hide the fact that the stored token is now stale for the next 30 minutes.
-        var handler = TokenEndpointHandler.Always(TokenJson());
+        const string secret = "ROTATED-DO-NOT-LEAK-1a2b";
+        var handler = TokenEndpointHandler.Always(TokenJson(refreshToken: secret));
         var store = new RecordingTokenStore { ThrowOnSave = new InvalidOperationException("disk full") };
-        var authenticator = NewAuthenticator(handler, store);
+        var log = new CapturingLogger<QuestradeAuthenticator>();
+        var authenticator = NewAuthenticator(handler, store, logger: log);
 
         await Assert.ThrowsAsync<InvalidOperationException>(() => authenticator.GetSessionAsync());
+
+        // The account is already lost at this instant — the presented token was consumed and
+        // its replacement exists nowhere — so the log has to name it, or the re-authorization
+        // prompt on the next call points at the wrong cause.
+        var error = Assert.Single(log.AtLevel(LogLevel.Error));
+        Assert.Contains("re-authoriz", error.Text, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain(secret, error.Text, StringComparison.Ordinal);
 
         store.ThrowOnSave = null;
         await authenticator.GetSessionAsync();
 
         // Two refreshes: nothing was cached by the attempt that could not persist.
         Assert.Equal(2, handler.Count);
+    }
+
+    [Theory]
+    [InlineData("""{"api_server":"https://api.x/","expires_in":1800,"refresh_token":"ROTATED-NEW"}""")]
+    [InlineData("""{"access_token":"a","expires_in":1800,"refresh_token":"ROTATED-NEW"}""")]
+    [InlineData("""{"access_token":"a","api_server":"https://api.x/","refresh_token":"ROTATED-NEW"}""")]
+    [InlineData("""{"access_token":"a","api_server":"https://api.x/","expires_in":"soon","refresh_token":"ROTATED-NEW"}""")]
+    public async Task A_malformed_success_response_still_persists_the_rotation(string body)
+    {
+        // The fourth way to lose the token, and the one the brief did not name: Questrade has
+        // already consumed the presented token by the time the body is parsed, so anything
+        // that throws between the exchange and the save throws away the only credential that
+        // still works. The replacement is right there in the payload.
+        var handler = TokenEndpointHandler.Always(body);
+        var store = new RecordingTokenStore { Token = "OLD-SPENT-TOKEN" };
+        var authenticator = NewAuthenticator(handler, store);
+
+        await Assert.ThrowsAsync<InvalidOperationException>(() => authenticator.GetSessionAsync());
+
+        Assert.Equal("ROTATED-NEW", store.Token);
+    }
+
+    [Fact]
+    public async Task A_success_response_with_no_refresh_token_requires_reauthorization()
+    {
+        // Nothing to persist and the presented token is spent, so this is unrecoverable in
+        // exactly the way an expired token is — and must arrive as the same, actionable type.
+        var handler = TokenEndpointHandler.Always(
+            """{"access_token":"a","api_server":"https://api.x/","expires_in":1800}""");
+        var store = new RecordingTokenStore { Token = "OLD-SPENT-TOKEN" };
+        var authenticator = NewAuthenticator(handler, store);
+
+        await Assert.ThrowsAsync<QuestradeReauthorizationRequiredException>(
+            () => authenticator.GetSessionAsync());
+
+        Assert.Empty(store.Saved);
+    }
+
+    [Fact]
+    public async Task A_truncated_success_response_fails_as_an_invalid_operation()
+    {
+        // Unrecoverable — there is no refresh token to rescue from a body that will not parse.
+        // Pinned so Tasks 7Q/8Q see the documented shape rather than a raw JsonException.
+        var handler = TokenEndpointHandler.Always("""{"access_token":"a","api_ser""");
+        var authenticator = NewAuthenticator(handler, new RecordingTokenStore());
+
+        var ex = await Assert.ThrowsAsync<InvalidOperationException>(
+            () => authenticator.GetSessionAsync());
+        Assert.Contains("JSON", ex.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public async Task An_expires_in_sent_as_a_string_is_accepted()
+    {
+        // Plenty of OAuth servers send expires_in as a JSON string. Rejecting it would cost
+        // the user their connection over a formatting detail.
+        var handler = TokenEndpointHandler.Always(
+            """{"access_token":"a","api_server":"https://api.x/","expires_in":"1800","refresh_token":"r"}""");
+        var authenticator = NewAuthenticator(handler, new RecordingTokenStore());
+
+        var session = await authenticator.GetSessionAsync();
+
+        Assert.Equal(Start.AddSeconds(1800 - 60), session.ExpiresAt);
+    }
+
+    [Fact]
+    public void A_formatted_session_never_prints_the_access_token()
+    {
+        // Records synthesize ToString() over every property, so one LogInformation("{Session}",
+        // session) anywhere downstream would put a live bearer credential on disk.
+        var session = new QuestradeSession(
+            "ACCESS-SECRET-XYZ", "https://api.x/", Start.AddMinutes(29));
+
+        var formatted = $"{session}";
+
+        Assert.DoesNotContain("ACCESS-SECRET-XYZ", formatted, StringComparison.Ordinal);
+        Assert.Contains("[redacted]", formatted, StringComparison.Ordinal);
+        // Still useful for debugging: everything that is not a credential still prints.
+        Assert.Contains("https://api.x/", formatted, StringComparison.Ordinal);
+        Assert.Contains("ExpiresAt", formatted, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -356,6 +436,8 @@ public class QuestradeAuthenticatorTests
         // A 401 means the access token is stale, not that the refresh token is bad: the
         // second refresh must present the token the first one rotated to.
         Assert.Contains("refresh_token=rotated-1", handler.Bodies[1], StringComparison.Ordinal);
+        // And must have re-read it from the store rather than remembering it in the process.
+        Assert.Equal(2, store.ReadCount);
     }
 
     [Fact]
@@ -363,11 +445,17 @@ public class QuestradeAuthenticatorTests
     {
         const string secret = "REFRESH-DO-NOT-LEAK-9f3a";
         const string rotated = "ROTATED-DO-NOT-LEAK-7b2c";
+        // The access token is a live bearer credential for the next 30 minutes and belongs in
+        // this set as much as the refresh tokens do — leaving it out is what let a log of the
+        // whole QuestradeSession record pass unnoticed.
+        const string access = "ACCESS-DO-NOT-LEAK-4d1e";
 
-        // Success: the rotated token must not be logged either.
+        // Success: neither the rotated token nor the access token may be logged.
         var okLogger = new CapturingLogger<QuestradeAuthenticator>();
-        var okHandler = TokenEndpointHandler.Always(TokenJson(refreshToken: rotated));
-        await NewAuthenticator(okHandler, new RecordingTokenStore(), secret, okLogger).GetSessionAsync();
+        var okHandler = TokenEndpointHandler.Always(
+            TokenJson(accessToken: access, refreshToken: rotated));
+        var session = await NewAuthenticator(
+            okHandler, new RecordingTokenStore(), secret, okLogger).GetSessionAsync();
 
         // 400: the re-authorization path.
         var badLogger = new CapturingLogger<QuestradeAuthenticator>();
@@ -382,14 +470,19 @@ public class QuestradeAuthenticatorTests
         var transient = await Assert.ThrowsAsync<InvalidOperationException>(
             () => NewAuthenticator(errorHandler, new RecordingTokenStore(), secret, errorLogger).GetSessionAsync());
 
+        // The session really is carrying the secret, so the assertions below are about
+        // redaction rather than about the value never having existed.
+        Assert.Equal(access, session.AccessToken);
+
         foreach (var text in new[]
                  {
                      okLogger.AllText, badLogger.AllText, errorLogger.AllText,
-                     reauth.ToString(), transient.ToString()
+                     reauth.ToString(), transient.ToString(), session.ToString()
                  })
         {
             Assert.DoesNotContain(secret, text, StringComparison.Ordinal);
             Assert.DoesNotContain(rotated, text, StringComparison.Ordinal);
+            Assert.DoesNotContain(access, text, StringComparison.Ordinal);
         }
     }
 }

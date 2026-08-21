@@ -1,5 +1,7 @@
 using System.Diagnostics.CodeAnalysis;
+using System.Globalization;
 using System.Net;
+using System.Text;
 using System.Text.Json;
 using Microsoft.Extensions.Options;
 
@@ -10,7 +12,22 @@ namespace StonkWatch.Web.Services.MarketData.Questrade;
 /// <paramref name="ApiServer"/> always ends with <c>/</c> and is whatever the token response
 /// returned — Questrade moves accounts between servers, so it is never hard-coded.
 /// </summary>
-public record QuestradeSession(string AccessToken, string ApiServer, DateTimeOffset ExpiresAt);
+public record QuestradeSession(string AccessToken, string ApiServer, DateTimeOffset ExpiresAt)
+{
+    /// <summary>
+    /// Records synthesize a <c>ToString()</c> that prints every property, so a single
+    /// <c>LogInformation("{Session}", session)</c> anywhere downstream would write a live
+    /// bearer credential to disk. Everything that is not a credential still prints, because a
+    /// formatted session that says nothing is one nobody will keep.
+    /// </summary>
+    protected virtual bool PrintMembers(StringBuilder builder)
+    {
+        builder.Append("AccessToken = [redacted], ");
+        builder.Append("ApiServer = ").Append(ApiServer).Append(", ");
+        builder.Append("ExpiresAt = ").Append(ExpiresAt.ToString("o", CultureInfo.InvariantCulture));
+        return true;
+    }
+}
 
 public interface IQuestradeAuthenticator
 {
@@ -143,11 +160,32 @@ public class QuestradeAuthenticator(
                 $"Questrade token request failed with HTTP {(int)response.StatusCode}.");
         }
 
-        var token = await ReadTokenResponseAsync(response);
+        using var document = await ParseAsync(response);
+        var root = document.RootElement;
 
-        // Failure mode 1: the rotation must be durable before anything can use the access
-        // token it came with. Awaited here, ahead of the cache write and the return.
-        await SaveRefreshTokenAsync(token.RefreshToken);
+        // Failure mode 1, and the whole reason for the ordering below: by the time this line
+        // runs Questrade has already consumed the token that was presented, so the rotated one
+        // in this body is the only credential left that works. It is rescued and made durable
+        // before anything else is read, because anything that throws in between — a missing
+        // field, an expires_in in an unexpected shape — would throw the account away with it.
+        var rotated = ReadString(root, "refresh_token");
+        if (rotated is null)
+        {
+            // Nothing to rescue and the presented token is spent: unrecoverable in exactly the
+            // way an expired token is, so it arrives as the same actionable type.
+            _session = null;
+            logger.LogWarning(
+                "Questrade returned a success response with no refresh token; "
+                + "re-authorization is required.");
+            throw new QuestradeReauthorizationRequiredException(
+                "Questrade returned no refresh token, so the previous one is spent. "
+                + "Re-authorize StonkWatch in the Questrade portal and set "
+                + "Questrade:BootstrapRefreshToken to the new token.");
+        }
+
+        await PersistRotationAsync(rotated);
+
+        var token = ReadTokenResponse(root, rotated);
 
         var session = new QuestradeSession(
             token.AccessToken,
@@ -175,27 +213,66 @@ public class QuestradeAuthenticator(
         return await http.SendAsync(request);
     }
 
-    private static async Task<TokenResponse> ReadTokenResponseAsync(HttpResponseMessage response)
+    private static async Task<JsonDocument> ParseAsync(HttpResponseMessage response)
     {
         await using var stream = await response.Content.ReadAsStreamAsync();
-        using var document = await JsonDocument.ParseAsync(stream);
-        var root = document.RootElement;
 
+        try
+        {
+            return await JsonDocument.ParseAsync(stream);
+        }
+        catch (JsonException)
+        {
+            // Unrecoverable — there is no refresh token to rescue from a body that will not
+            // parse. Re-shaped so callers see the documented failure type; the JsonException
+            // is deliberately not attached, because its message can quote the fragment it
+            // choked on, and that fragment is a token response.
+            throw new InvalidOperationException(
+                "The Questrade token response was not valid JSON.");
+        }
+    }
+
+    /// <summary>
+    /// Reads everything except the refresh token, which the caller has already rescued and
+    /// persisted — hence <paramref name="refreshToken"/> arriving as an argument.
+    /// </summary>
+    private static TokenResponse ReadTokenResponse(JsonElement root, string refreshToken)
+    {
         var accessToken = ReadString(root, "access_token");
         var apiServer = ReadString(root, "api_server");
-        var refreshToken = ReadString(root, "refresh_token");
+        var seconds = ReadExpiresIn(root);
 
-        if (accessToken is null || apiServer is null || refreshToken is null
-            || !root.TryGetProperty("expires_in", out var expiresIn)
-            || !expiresIn.TryGetInt32(out var seconds))
+        if (accessToken is null || apiServer is null || seconds is null)
         {
             // Names the missing shape, never a value.
             throw new InvalidOperationException(
                 "The Questrade token response was missing access_token, api_server, "
-                + "expires_in, or refresh_token.");
+                + "or expires_in.");
         }
 
-        return new TokenResponse(accessToken, apiServer, seconds, refreshToken);
+        return new TokenResponse(accessToken, apiServer, seconds.Value, refreshToken);
+    }
+
+    /// <summary>
+    /// Accepts <c>expires_in</c> as a JSON number or a JSON string. Plenty of OAuth servers
+    /// send the string form, and rejecting it would cost the user their connection over a
+    /// formatting detail.
+    /// </summary>
+    private static int? ReadExpiresIn(JsonElement root)
+    {
+        if (!root.TryGetProperty("expires_in", out var value))
+        {
+            return null;
+        }
+
+        return value.ValueKind switch
+        {
+            JsonValueKind.Number when value.TryGetInt32(out var number) => number,
+            JsonValueKind.String when int.TryParse(
+                value.GetString(), NumberStyles.Integer, CultureInfo.InvariantCulture,
+                out var parsed) => parsed,
+            _ => null
+        };
     }
 
     private static string? ReadString(JsonElement element, string property) =>
@@ -217,14 +294,45 @@ public class QuestradeAuthenticator(
             .ReadAsync();
     }
 
-    private async Task SaveRefreshTokenAsync(string refreshToken)
+    /// <summary>
+    /// Stores the rotated token, and makes a noise if it cannot. This is the worst moment in
+    /// the class: the presented token is already spent and its replacement now exists nowhere,
+    /// so the connection is dead and only the user can revive it. The exception propagates —
+    /// nothing is cached, so no caller receives a session built on a rotation that was lost —
+    /// but on its own it would surface half an hour later as a bare "invalid_grant", pointing
+    /// at the wrong cause. The log entry is what connects the two.
+    /// </summary>
+    private async Task PersistRotationAsync(string refreshToken)
     {
-        await using var scope = scopeFactory.CreateAsyncScope();
-        await scope.ServiceProvider
-            .GetRequiredService<IQuestradeTokenStore>()
-            .SaveAsync(refreshToken);
+        try
+        {
+            await using var scope = scopeFactory.CreateAsyncScope();
+            await scope.ServiceProvider
+                .GetRequiredService<IQuestradeTokenStore>()
+                .SaveAsync(refreshToken);
+        }
+        catch (Exception ex)
+        {
+            logger.LogError(
+                ex,
+                "The rotated Questrade refresh token could not be persisted. The previous "
+                + "token is already spent, so Questrade access is lost until you re-authorize "
+                + "StonkWatch in the Questrade portal.");
+            throw;
+        }
     }
 
     private record TokenResponse(
-        string AccessToken, string ApiServer, int ExpiresIn, string RefreshToken);
+        string AccessToken, string ApiServer, int ExpiresIn, string RefreshToken)
+    {
+        /// <summary>Same reasoning as <see cref="QuestradeSession"/>: two credentials here.</summary>
+        protected virtual bool PrintMembers(StringBuilder builder)
+        {
+            builder.Append("AccessToken = [redacted], ");
+            builder.Append("ApiServer = ").Append(ApiServer).Append(", ");
+            builder.Append("ExpiresIn = ").Append(ExpiresIn.ToString(CultureInfo.InvariantCulture));
+            builder.Append(", RefreshToken = [redacted]");
+            return true;
+        }
+    }
 }
