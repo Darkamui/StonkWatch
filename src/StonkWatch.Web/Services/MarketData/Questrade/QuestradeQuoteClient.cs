@@ -1,6 +1,4 @@
 using System.Globalization;
-using System.Net;
-using System.Net.Http.Headers;
 using System.Text.Json;
 
 namespace StonkWatch.Web.Services.MarketData.Questrade;
@@ -25,8 +23,10 @@ public interface IQuestradeQuoteClient
 /// Batched Questrade quote and previous-close REST calls, bearer-authenticated from
 /// <see cref="IQuestradeAuthenticator"/>. A 401 means the access token went stale mid-flight
 /// (it is only good for 30 minutes) rather than anything wrong with the request itself, so it
-/// is handled once with an invalidate-and-retry; anything else is logged and swallowed so one
-/// bad poll can't kill the worker loop.
+/// is handled once with an invalidate-and-retry; any other non-success status is logged and
+/// swallowed. A transport-level failure (DNS, connection refused, TLS) is not caught here and
+/// propagates to the caller — the worker's own catch-all is what keeps that from killing the
+/// loop, not this class.
 /// </summary>
 public class QuestradeQuoteClient(
     HttpClient http,
@@ -111,56 +111,18 @@ public class QuestradeQuoteClient(
     }
 
     /// <summary>
-    /// Sends the batched GET, retrying exactly once on a 401 after invalidating the cached
-    /// session. A second 401 throws — the retry is bounded, not a loop. Any other non-success
-    /// status is logged (path and status code only; the token lives in the header and is
-    /// never logged) and answered with a null response, which callers turn into an empty
-    /// result rather than letting one failed poll take the worker down.
+    /// Sends the batched GET via the shared <see cref="QuestradeHttp"/> policy: retry exactly
+    /// once on a 401 after invalidating the cached session; a second 401 throws — the retry is
+    /// bounded, not a loop. Any other non-success status is logged (path and status code only;
+    /// the token lives in the header and is never logged) and answered with a null response,
+    /// which callers turn into an empty result rather than letting one failed poll take the
+    /// worker down.
     /// </summary>
-    private async Task<HttpResponseMessage?> SendWithRetryAsync(
-        string path, IReadOnlyCollection<int> symbolIds, CancellationToken ct)
-    {
-        var session = await authenticator.GetSessionAsync(ct);
-        var response = await SendAsync(session, path, symbolIds, ct);
-
-        if (response.StatusCode == HttpStatusCode.Unauthorized)
-        {
-            response.Dispose();
-            authenticator.Invalidate();
-
-            session = await authenticator.GetSessionAsync(ct);
-            response = await SendAsync(session, path, symbolIds, ct);
-
-            if (response.StatusCode == HttpStatusCode.Unauthorized)
-            {
-                response.Dispose();
-                throw new HttpRequestException(
-                    $"Questrade rejected the access token twice for {path}.",
-                    inner: null, HttpStatusCode.Unauthorized);
-            }
-        }
-
-        if (!response.IsSuccessStatusCode)
-        {
-            logger.LogWarning(
-                "Questrade request to {Path} failed with {StatusCode}", path, (int)response.StatusCode);
-            response.Dispose();
-            return null;
-        }
-
-        return response;
-    }
-
-    private async Task<HttpResponseMessage> SendAsync(
-        QuestradeSession session, string path, IReadOnlyCollection<int> symbolIds, CancellationToken ct)
-    {
-        var url = $"{session.ApiServer}{path}?ids={string.Join(',', symbolIds)}";
-
-        using var request = new HttpRequestMessage(HttpMethod.Get, url);
-        request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", session.AccessToken);
-
-        return await http.SendAsync(request, ct);
-    }
+    private Task<HttpResponseMessage?> SendWithRetryAsync(
+        string path, IReadOnlyCollection<int> symbolIds, CancellationToken ct) =>
+        QuestradeHttp.SendWithRetryAsync(
+            http, authenticator, logger, path,
+            session => $"{session.ApiServer}{path}?ids={string.Join(',', symbolIds)}", ct);
 
     private static bool TryGetInt(JsonElement element, string property, out int value)
     {

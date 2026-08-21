@@ -49,6 +49,36 @@ public class QuestradeSymbolResolverTests
         }
     }
 
+    /// <summary>Numbers each request (1-based) so a handler can answer the Nth call differently
+    /// — needed to script a 401-then-success sequence for the invalidate-and-retry tests.</summary>
+    private sealed class SequencedHandler(Func<int, HttpRequestMessage, HttpResponseMessage> respond)
+        : HttpMessageHandler
+    {
+        private int _count;
+
+        public List<HttpRequestMessage> Requests { get; } = [];
+
+        protected override Task<HttpResponseMessage> SendAsync(
+            HttpRequestMessage request, CancellationToken cancellationToken)
+        {
+            var n = Interlocked.Increment(ref _count);
+            Requests.Add(request);
+            return Task.FromResult(respond(n, request));
+        }
+    }
+
+    private sealed class CountingAuthenticator(QuestradeSession session) : IQuestradeAuthenticator
+    {
+        private int _invalidateCalls;
+
+        public int InvalidateCalls => Volatile.Read(ref _invalidateCalls);
+
+        public Task<QuestradeSession> GetSessionAsync(CancellationToken ct = default) =>
+            Task.FromResult(session);
+
+        public void Invalidate() => Interlocked.Increment(ref _invalidateCalls);
+    }
+
     // ---- helpers ------------------------------------------------------------------------
 
     private static HttpResponseMessage Respond(string body, HttpStatusCode status = HttpStatusCode.OK) =>
@@ -165,5 +195,91 @@ public class QuestradeSymbolResolverTests
 
         Assert.DoesNotContain("ZZZZ", result.Keys);
         Assert.Equal(2, result["AAPL"]);
+    }
+
+    [Fact]
+    public async Task A_ticker_is_normalized_before_it_is_looked_up_or_cached()
+    {
+        var handler = new RecordingHandler(_ => Respond(SearchResponse(("AAPL", "NASDAQ", 2))));
+        var resolver = NewResolver(handler);
+
+        var result = await resolver.ResolveAsync([" aapl "]);
+        Assert.Equal(2, result["AAPL"]);
+        Assert.Contains("prefix=AAPL", handler.Requests[0].RequestUri!.Query, StringComparison.Ordinal);
+
+        // A second call with different surrounding whitespace/case must still hit the
+        // positive cache under the normalized key, not send a new request.
+        await resolver.ResolveAsync(["Aapl"]);
+        Assert.Single(handler.Requests);
+    }
+
+    // ---------- M-1 fix: a transient HTTP failure must not poison the negative cache ---------
+
+    [Fact]
+    public async Task A_transient_search_failure_is_not_negative_cached()
+    {
+        // First request 401s (a stale access token, not "this ticker doesn't exist"); the
+        // retry, after Invalidate(), gets a valid payload. The old bug conflated the two and
+        // blacklisted the ticker for 30 minutes; the fix must resolve it in this same call by
+        // retrying once, exactly like the quote client already does.
+        var handler = new SequencedHandler((n, _) => n == 1
+            ? Respond("", HttpStatusCode.Unauthorized)
+            : Respond(SearchResponse(("AAPL", "NASDAQ", 2))));
+        var auth = new CountingAuthenticator(Session);
+        var resolver = NewResolver(handler, authenticator: auth);
+
+        var result = await resolver.ResolveAsync(["AAPL"]);
+
+        Assert.Equal(2, result["AAPL"]);
+        Assert.Equal(1, auth.InvalidateCalls);
+        Assert.Equal(2, handler.Requests.Count);
+    }
+
+    [Fact]
+    public async Task A_second_consecutive_401_leaves_the_ticker_unresolved_but_not_negative_cached()
+    {
+        // A repeated 401 is still a transient failure, not "no such ticker" — it must not be
+        // written into the 30-minute negative cache. The next tick (three seconds later in
+        // production) gets a fresh chance rather than waiting out a half-hour blackout.
+        var handler = new SequencedHandler((_, _) => Respond("", HttpStatusCode.Unauthorized));
+        var auth = new CountingAuthenticator(Session);
+        var resolver = NewResolver(handler, authenticator: auth);
+
+        var first = await resolver.ResolveAsync(["AAPL"]);
+        Assert.DoesNotContain("AAPL", first.Keys);
+        Assert.Equal(2, handler.Requests.Count); // one attempt, one retry — bounded, not a loop
+
+        // A second call immediately after must try the network again, not silently answer from
+        // a negative cache it should never have been written to.
+        var second = await resolver.ResolveAsync(["AAPL"]);
+        Assert.DoesNotContain("AAPL", second.Keys);
+        Assert.Equal(4, handler.Requests.Count);
+    }
+
+    [Fact]
+    public async Task A_mid_batch_401_does_not_blacklist_every_remaining_ticker()
+    {
+        // The old bug fetched one session before the whole lookup loop, so a token that went
+        // stale partway through a cold-start batch 401'd (and negative-cached) every ticker
+        // still to come. Each lookup must get its own retry-protected session.
+        var handler = new SequencedHandler((n, request) =>
+        {
+            // AAPL 401s once, then succeeds on retry; MSFT must not be swept up in that.
+            if (request.RequestUri!.Query.Contains("AAPL", StringComparison.Ordinal) && n <= 2)
+            {
+                return n == 1
+                    ? Respond("", HttpStatusCode.Unauthorized)
+                    : Respond(SearchResponse(("AAPL", "NASDAQ", 2)));
+            }
+
+            return Respond(SearchResponse(("MSFT", "NASDAQ", 3)));
+        });
+        var auth = new CountingAuthenticator(Session);
+        var resolver = NewResolver(handler, authenticator: auth);
+
+        var result = await resolver.ResolveAsync(["AAPL", "MSFT"]);
+
+        Assert.Equal(2, result["AAPL"]);
+        Assert.Equal(3, result["MSFT"]);
     }
 }

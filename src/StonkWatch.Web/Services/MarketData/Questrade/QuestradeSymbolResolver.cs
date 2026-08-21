@@ -1,5 +1,4 @@
 using System.Collections.Concurrent;
-using System.Net.Http.Headers;
 using System.Text.Json;
 
 namespace StonkWatch.Web.Services.MarketData.Questrade;
@@ -7,8 +6,11 @@ namespace StonkWatch.Web.Services.MarketData.Questrade;
 /// <summary>
 /// Maps watchlist tickers to the numeric <c>symbolId</c> Questrade's quote and symbol
 /// endpoints key on. Ids are stable for the life of the symbol, so a resolved id is cached
-/// for the process lifetime; a ticker that fails to resolve is negative-cached instead, so a
-/// delisted symbol left on the watchlist doesn't re-search on every poll forever.
+/// for the process lifetime; a ticker that a *successful* search genuinely finds nothing for
+/// is negative-cached instead, so a delisted symbol left on the watchlist doesn't re-search on
+/// every poll forever. A failed search (a stale access token, a 500, a dropped connection) is
+/// not evidence the ticker doesn't exist, so it is never negative-cached — see
+/// <see cref="LookupOutcome"/>.
 /// </summary>
 public interface IQuestradeSymbolResolver
 {
@@ -42,6 +44,24 @@ public class QuestradeSymbolResolver(
     private readonly ConcurrentDictionary<string, int> _resolved = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, DateTimeOffset> _negativeUntil = new(StringComparer.Ordinal);
 
+    /// <summary>
+    /// A search either resolves, genuinely finds no matching US listing (safe to negative-cache),
+    /// or fails transiently (never safe to negative-cache — the next tick gets a fresh attempt).
+    /// </summary>
+    private enum LookupOutcome
+    {
+        Resolved,
+        NotFound,
+        TransientFailure
+    }
+
+    private readonly record struct LookupResult(LookupOutcome Outcome, int Id = 0)
+    {
+        public static LookupResult Resolved(int id) => new(LookupOutcome.Resolved, id);
+        public static readonly LookupResult NotFound = new(LookupOutcome.NotFound);
+        public static readonly LookupResult TransientFailure = new(LookupOutcome.TransientFailure);
+    }
+
     public async Task<IReadOnlyDictionary<string, int>> ResolveAsync(
         IReadOnlyCollection<string> tickers, CancellationToken ct = default)
     {
@@ -72,49 +92,68 @@ public class QuestradeSymbolResolver(
             toLookup.Add(ticker);
         }
 
-        if (toLookup.Count == 0)
-        {
-            return result;
-        }
-
-        var session = await authenticator.GetSessionAsync(ct);
-
+        // Each ticker gets its own session fetch (cheap: the authenticator caches a valid one)
+        // and its own invalidate-and-retry-once policy via QuestradeHttp, rather than one
+        // session shared across the whole loop — otherwise a token that goes stale partway
+        // through a cold-start batch would 401 every ticker still to come.
         foreach (var ticker in toLookup)
         {
             ct.ThrowIfCancellationRequested();
 
-            var id = await LookupAsync(session, ticker, ct);
-            if (id is { } resolvedId)
+            var lookup = await LookupAsync(ticker, ct);
+            switch (lookup.Outcome)
             {
-                _resolved[ticker] = resolvedId;
-                _negativeUntil.TryRemove(ticker, out _);
-                result[ticker] = resolvedId;
-            }
-            else
-            {
-                _negativeUntil[ticker] = timeProvider.GetUtcNow() + TimeSpan.FromMinutes(NegativeCacheMinutes);
+                case LookupOutcome.Resolved:
+                    _resolved[ticker] = lookup.Id;
+                    _negativeUntil.TryRemove(ticker, out _);
+                    result[ticker] = lookup.Id;
+                    break;
+
+                case LookupOutcome.NotFound:
+                    // A successful search that genuinely found no matching US listing — safe
+                    // to negative-cache.
+                    _negativeUntil[ticker] = timeProvider.GetUtcNow() + TimeSpan.FromMinutes(NegativeCacheMinutes);
+                    break;
+
+                case LookupOutcome.TransientFailure:
+                    // Not evidence the ticker doesn't exist — leave it unresolved for this
+                    // tick only. QuestradeHttp already logged the status; the next tick (a few
+                    // seconds later) retries naturally instead of waiting out a 30-minute
+                    // blackout.
+                    break;
             }
         }
 
         return result;
     }
 
-    private async Task<int?> LookupAsync(QuestradeSession session, string ticker, CancellationToken ct)
+    private async Task<LookupResult> LookupAsync(string ticker, CancellationToken ct)
     {
         const string path = "v1/symbols/search";
-        var url = $"{session.ApiServer}{path}?prefix={Uri.EscapeDataString(ticker)}";
 
-        using var request = new HttpRequestMessage(HttpMethod.Get, url);
-        request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", session.AccessToken);
-
-        using var response = await http.SendAsync(request, ct);
-        if (!response.IsSuccessStatusCode)
+        HttpResponseMessage? response;
+        try
         {
-            // The token travels in the header, never the URL, so the path alone is safe to log.
-            logger.LogWarning(
-                "Questrade symbol search failed with {StatusCode} for {Path}",
-                (int)response.StatusCode, path);
-            return null;
+            response = await QuestradeHttp.SendWithRetryAsync(
+                http, authenticator, logger, path,
+                session => $"{session.ApiServer}{path}?prefix={Uri.EscapeDataString(ticker)}", ct);
+        }
+        catch (HttpRequestException ex)
+        {
+            // QuestradeHttp throws when a second 401 follows the invalidate-and-retry — a
+            // persistently stale token, not evidence this ticker doesn't exist. Unlike the
+            // quote client (one batched call, nothing to isolate), the resolver processes
+            // tickers one at a time in a loop: a hard auth failure must cost this ticker one
+            // tick, not the rest of the batch. The message is token-free (QuestradeHttp names
+            // only the path), so logging it is safe.
+            logger.LogWarning(ex, "Symbol search for {Ticker} could not authenticate", ticker);
+            return LookupResult.TransientFailure;
+        }
+
+        using var _ = response;
+        if (response is null)
+        {
+            return LookupResult.TransientFailure;
         }
 
         await using var stream = await response.Content.ReadAsStreamAsync(ct);
@@ -123,7 +162,7 @@ public class QuestradeSymbolResolver(
         if (!doc.RootElement.TryGetProperty("symbols", out var symbols)
             || symbols.ValueKind != JsonValueKind.Array)
         {
-            return null;
+            return LookupResult.NotFound;
         }
 
         foreach (var entry in symbols.EnumerateArray())
@@ -144,11 +183,11 @@ public class QuestradeSymbolResolver(
                 && idElement.ValueKind == JsonValueKind.Number
                 && idElement.TryGetInt32(out var id))
             {
-                return id;
+                return LookupResult.Resolved(id);
             }
         }
 
-        return null;
+        return LookupResult.NotFound;
     }
 
     private static bool TryGetString(JsonElement element, string property, out string value)
