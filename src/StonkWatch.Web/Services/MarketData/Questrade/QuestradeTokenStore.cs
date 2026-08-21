@@ -71,6 +71,13 @@ public class QuestradeTokenStore(
         // A raw upsert rather than find-then-add: EF's read-modify-write would throw a
         // primary key violation if two saves ever raced, and a save that throws is a lost
         // refresh token, which locks the user out until they re-authorize by hand.
+        //
+        // Across two processes this is last-writer-wins, and that is deliberate. The check
+        // constraint makes two competing rows impossible; it cannot make two competing
+        // *values* impossible, and no in-process lock can either. Two instances refreshing one
+        // Questrade account would each consume a token and invalidate the other's no matter
+        // what this method did — the invariant is "never run two instances against one
+        // account", enforced by deployment and documented in operations, not by a lock here.
         await db.Database.ExecuteSqlInterpolatedAsync(
             $"""
              INSERT INTO questrade_token (id, protected_refresh_token, updated_at)

@@ -1,5 +1,6 @@
 using Microsoft.AspNetCore.DataProtection;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Time.Testing;
 using StonkWatch.Web.Data;
@@ -22,11 +23,7 @@ public class QuestradeTokenStoreTests : IAsyncLifetime, IDisposable
 
     public QuestradeTokenStoreTests(PostgresFixture fixture) => _fixture = fixture;
 
-    public async Task InitializeAsync()
-    {
-        await using var db = _fixture.CreateContext();
-        await db.Database.ExecuteSqlRawAsync("DELETE FROM questrade_token;");
-    }
+    public Task InitializeAsync() => _fixture.ResetAsync();
 
     public Task DisposeAsync() => Task.CompletedTask;
 
@@ -49,8 +46,15 @@ public class QuestradeTokenStoreTests : IAsyncLifetime, IDisposable
     }
 
     private QuestradeTokenStore NewStore(
-        StonkWatchDbContext db, IDataProtectionProvider keys) =>
-        new(db, keys, _time, NullLogger<QuestradeTokenStore>.Instance);
+        StonkWatchDbContext db,
+        IDataProtectionProvider keys,
+        ILogger<QuestradeTokenStore>? logger = null) =>
+        new(db, keys, _time, logger ?? NullLogger<QuestradeTokenStore>.Instance);
+
+    private static Task<string> ReadCiphertextAsync(StonkWatchDbContext db) =>
+        db.Database
+            .SqlQueryRaw<string>("SELECT protected_refresh_token AS \"Value\" FROM questrade_token")
+            .SingleAsync();
 
     [Fact]
     public async Task Saving_then_reading_returns_the_same_token()
@@ -82,9 +86,7 @@ public class QuestradeTokenStoreTests : IAsyncLifetime, IDisposable
 
         await using (var db = _fixture.CreateContext())
         {
-            var stored = await db.Database
-                .SqlQueryRaw<string>("SELECT protected_refresh_token AS \"Value\" FROM questrade_token")
-                .SingleAsync();
+            var stored = await ReadCiphertextAsync(db);
 
             Assert.DoesNotContain(plaintext, stored, StringComparison.Ordinal);
             Assert.NotEmpty(stored);
@@ -117,18 +119,52 @@ public class QuestradeTokenStoreTests : IAsyncLifetime, IDisposable
     [Fact]
     public async Task A_token_that_cannot_be_decrypted_reads_as_null()
     {
+        const string plaintext = "written-with-the-old-keys";
+
         await using (var db = _fixture.CreateContext())
         {
-            await NewStore(db, Keys("primary")).SaveAsync("written-with-the-old-keys");
+            await NewStore(db, Keys("primary")).SaveAsync(plaintext);
         }
 
         await using (var db = _fixture.CreateContext())
         {
+            var ciphertext = await ReadCiphertextAsync(db);
+            var log = new CapturingLogger<QuestradeTokenStore>();
+
             // Stands in for Data Protection keys regenerated on restart, which is what
             // happens when DataProtectionKeysPath is not configured.
-            var read = await NewStore(db, Keys("regenerated")).ReadAsync();
+            var read = await NewStore(db, Keys("regenerated"), log).ReadAsync();
             Assert.Null(read);
+
+            // That warning is the only runtime signal that the user's Questrade connection
+            // just died, so it has to actually fire — and say what to do about it.
+            var warning = Assert.Single(log.Entries);
+            Assert.Equal(LogLevel.Warning, warning.Level);
+            Assert.Contains("DataProtectionKeysPath", warning.Text, StringComparison.Ordinal);
+            Assert.DoesNotContain(plaintext, warning.Text, StringComparison.Ordinal);
+            Assert.DoesNotContain(ciphertext, warning.Text, StringComparison.Ordinal);
         }
+    }
+
+    [Fact]
+    public async Task The_protector_purpose_string_is_stable()
+    {
+        // Pinned from outside the class: every other test protects and unprotects through the
+        // same store, so both sides move together and a renamed purpose stays invisible.
+        // Changing it orphans the token already in the user's database.
+        var keys = Keys("primary");
+        var ciphertext = keys
+            .CreateProtector("StonkWatch.Questrade.RefreshToken")
+            .Protect("seeded-by-hand");
+
+        await using var db = _fixture.CreateContext();
+        await db.Database.ExecuteSqlInterpolatedAsync(
+            $"""
+             INSERT INTO questrade_token (id, protected_refresh_token, updated_at)
+             VALUES (1, {ciphertext}, now())
+             """);
+
+        Assert.Equal("seeded-by-hand", await NewStore(db, keys).ReadAsync());
     }
 
     [Fact]
