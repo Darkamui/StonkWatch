@@ -34,8 +34,13 @@ public class QuestradeAuthenticatorTests : IDisposable
 
     // ---- test doubles -------------------------------------------------------------------
 
-    /// <summary>Stands in for the Questrade token endpoint, recording every request body.</summary>
-    private sealed class TokenEndpointHandler(Func<int, HttpResponseMessage> respond) : HttpMessageHandler
+    /// <summary>
+    /// Stands in for the Questrade token endpoint, recording every request body. The responder
+    /// sees the request number and the form body, so a fake can answer on the token presented
+    /// the way the real endpoint does.
+    /// </summary>
+    private sealed class TokenEndpointHandler(Func<int, string, HttpResponseMessage> respond)
+        : HttpMessageHandler
     {
         private readonly Lock _sync = new();
         private int _count;
@@ -49,7 +54,16 @@ public class QuestradeAuthenticatorTests : IDisposable
         public int Count => Volatile.Read(ref _count);
 
         public static TokenEndpointHandler Always(string body, HttpStatusCode status = HttpStatusCode.OK) =>
-            new(_ => Respond(body, status));
+            new((_, _) => Respond(body, status));
+
+        /// <summary>
+        /// Behaves like Questrade: the named token is live and anything else — spent, expired,
+        /// or never issued — comes back 400 invalid_grant.
+        /// </summary>
+        public static TokenEndpointHandler AcceptingOnly(string liveToken, string okBody) =>
+            new((_, body) => body.Contains($"refresh_token={liveToken}", StringComparison.Ordinal)
+                ? Respond(okBody)
+                : Respond("""{"error":"invalid_grant"}""", HttpStatusCode.BadRequest));
 
         public static HttpResponseMessage Respond(string body, HttpStatusCode status = HttpStatusCode.OK) =>
             new(status) { Content = new StringContent(body, System.Text.Encoding.UTF8, "application/json") };
@@ -73,7 +87,7 @@ public class QuestradeAuthenticatorTests : IDisposable
                 await Gate.Task;
             }
 
-            return respond(n);
+            return respond(n, body);
         }
     }
 
@@ -83,7 +97,9 @@ public class QuestradeAuthenticatorTests : IDisposable
         public string? Token { get; set; }
         public List<string> Saved { get; } = [];
         public int ReadCount { get; private set; }
+        public int ClearCount { get; private set; }
         public Exception? ThrowOnSave { get; set; }
+        public Exception? ThrowOnClear { get; set; }
 
         public Task<string?> ReadAsync(CancellationToken ct = default)
         {
@@ -91,7 +107,7 @@ public class QuestradeAuthenticatorTests : IDisposable
             return Task.FromResult(Token);
         }
 
-        public Task SaveAsync(string refreshToken, CancellationToken ct = default)
+        public Task SaveAsync(string refreshToken)
         {
             if (ThrowOnSave is not null)
             {
@@ -101,6 +117,19 @@ public class QuestradeAuthenticatorTests : IDisposable
             Token = refreshToken;
             Saved.Add(refreshToken);
             events?.Add("saved");
+            return Task.CompletedTask;
+        }
+
+        public Task ClearAsync(CancellationToken ct = default)
+        {
+            if (ThrowOnClear is not null)
+            {
+                throw ThrowOnClear;
+            }
+
+            ClearCount++;
+            Token = null;
+            events?.Add("cleared");
             return Task.CompletedTask;
         }
     }
@@ -392,6 +421,96 @@ public class QuestradeAuthenticatorTests : IDisposable
     }
 
     [Fact]
+    public async Task A_locked_out_user_recovers_by_configuring_a_new_bootstrap_token()
+    {
+        // The whole point of the advice both re-authorization messages print. The user has
+        // re-authorized in the Questrade portal and put the new token in configuration; the
+        // stored one is three days dead. If the store is never cleared, the dead token is
+        // preferred forever and the only escape is a DELETE against the production database.
+        var handler = TokenEndpointHandler.AcceptingOnly(
+            "GOOD-BOOTSTRAP", TokenJson(refreshToken: "rotated-after-recovery"));
+        var store = new RecordingTokenStore { Token = "DEAD-STORED-TOKEN" };
+        var authenticator = NewAuthenticator(handler, store, bootstrapRefreshToken: "GOOD-BOOTSTRAP");
+
+        // First call: the stored token is presented, Questrade rejects it, the user is told to
+        // set a bootstrap token — which they already have.
+        await Assert.ThrowsAsync<QuestradeReauthorizationRequiredException>(
+            () => authenticator.GetSessionAsync());
+        Assert.Contains("refresh_token=DEAD-STORED-TOKEN", handler.Bodies[0], StringComparison.Ordinal);
+
+        // Second call: no restart, no manual database surgery, no configuration change beyond
+        // the one the message asked for.
+        var session = await authenticator.GetSessionAsync();
+
+        Assert.Equal("access-1", session.AccessToken);
+        Assert.Equal(2, handler.Count);
+        Assert.Contains("refresh_token=GOOD-BOOTSTRAP", handler.Bodies[1], StringComparison.Ordinal);
+        Assert.DoesNotContain("DEAD-STORED-TOKEN", handler.Bodies[1], StringComparison.Ordinal);
+
+        // And the rotation from the recovery refresh is what the store now holds, so the
+        // bootstrap value goes back to being a fallback rather than the live credential.
+        Assert.Equal("rotated-after-recovery", store.Token);
+    }
+
+    [Fact]
+    public async Task A_rejected_bootstrap_token_throws_instead_of_looping()
+    {
+        // Clearing the store on a 400 must not turn "the bootstrap token is bad too" into a
+        // retry loop: there is nothing left to fall back to, so the second attempt has to fail
+        // the same way the first did, with one request each.
+        var handler = TokenEndpointHandler.AcceptingOnly("NEVER-SENT", TokenJson());
+        var store = new RecordingTokenStore();
+        var authenticator = NewAuthenticator(handler, store, bootstrapRefreshToken: "ALSO-DEAD");
+
+        await Assert.ThrowsAsync<QuestradeReauthorizationRequiredException>(
+            () => authenticator.GetSessionAsync());
+        Assert.Equal(1, handler.Count);
+
+        await Assert.ThrowsAsync<QuestradeReauthorizationRequiredException>(
+            () => authenticator.GetSessionAsync());
+        Assert.Equal(2, handler.Count);
+    }
+
+    [Fact]
+    public async Task A_store_that_cannot_be_cleared_still_reports_reauthorization_required()
+    {
+        // If the clear fails the user is worse off, not better — but the actionable failure is
+        // still "re-authorize", so that type must survive, with the clear failure named in the
+        // log rather than swallowed.
+        var handler = TokenEndpointHandler.Always(
+            """{"error":"invalid_grant"}""", HttpStatusCode.BadRequest);
+        var store = new RecordingTokenStore
+        {
+            Token = "DEAD-STORED-TOKEN",
+            ThrowOnClear = new InvalidOperationException("database unreachable")
+        };
+        var log = new CapturingLogger<QuestradeAuthenticator>();
+        var authenticator = NewAuthenticator(handler, store, logger: log);
+
+        await Assert.ThrowsAsync<QuestradeReauthorizationRequiredException>(
+            () => authenticator.GetSessionAsync());
+
+        var error = Assert.Single(log.AtLevel(LogLevel.Error));
+        Assert.Contains("clear", error.Text, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("DEAD-STORED-TOKEN", error.Text, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void A_formatted_token_response_never_prints_either_token()
+    {
+        // The session's guard has its own test; this one pins TokenResponse independently,
+        // which is otherwise only covered indirectly by whatever happens to log it.
+        var token = new QuestradeAuthenticator.TokenResponse(
+            "ACCESS-SECRET-XYZ", "https://api.x/", 1800, "REFRESH-SECRET-ABC");
+
+        var formatted = $"{token}";
+
+        Assert.DoesNotContain("ACCESS-SECRET-XYZ", formatted, StringComparison.Ordinal);
+        Assert.DoesNotContain("REFRESH-SECRET-ABC", formatted, StringComparison.Ordinal);
+        Assert.Contains("https://api.x/", formatted, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task No_stored_token_and_no_bootstrap_token_requires_reauthorization()
     {
         var handler = TokenEndpointHandler.Always(TokenJson());
@@ -406,7 +525,7 @@ public class QuestradeAuthenticatorTests : IDisposable
     [Fact]
     public async Task A_transient_failure_does_not_wedge_the_authenticator()
     {
-        var handler = new TokenEndpointHandler(n => n == 1
+        var handler = new TokenEndpointHandler((n, _) => n == 1
             ? TokenEndpointHandler.Respond("upstream boom", HttpStatusCode.InternalServerError)
             : TokenEndpointHandler.Respond(TokenJson()));
         var authenticator = NewAuthenticator(handler, new RecordingTokenStore());
@@ -438,6 +557,9 @@ public class QuestradeAuthenticatorTests : IDisposable
         Assert.Contains("refresh_token=rotated-1", handler.Bodies[1], StringComparison.Ordinal);
         // And must have re-read it from the store rather than remembering it in the process.
         Assert.Equal(2, store.ReadCount);
+        // A 401 is a stale access token, not a bad refresh token: clearing here would force a
+        // manual re-authorization for something that resolved itself.
+        Assert.Equal(0, store.ClearCount);
     }
 
     [Fact]

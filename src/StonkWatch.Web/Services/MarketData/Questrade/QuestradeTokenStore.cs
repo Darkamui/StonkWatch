@@ -59,7 +59,8 @@ public class QuestradeTokenStore(
         }
     }
 
-    public async Task SaveAsync(string refreshToken, CancellationToken ct = default)
+    /// <inheritdoc />
+    public async Task SaveAsync(string refreshToken)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(refreshToken);
 
@@ -85,7 +86,14 @@ public class QuestradeTokenStore(
              ON CONFLICT (id) DO UPDATE
                  SET protected_refresh_token = EXCLUDED.protected_refresh_token,
                      updated_at = EXCLUDED.updated_at
-             """,
-            ct);
+             """);
     }
+
+    /// <inheritdoc />
+    public Task ClearAsync(CancellationToken ct = default) =>
+        // DELETE, not "set to empty": ReadAsync treats a missing row and an unusable one the
+        // same way, but an empty string would have to be special-cased by every future reader.
+        // No row to delete is a no-op, which is what the 400 path needs.
+        db.Database.ExecuteSqlInterpolatedAsync(
+            $"DELETE FROM questrade_token WHERE id = {SingletonId}", ct);
 }

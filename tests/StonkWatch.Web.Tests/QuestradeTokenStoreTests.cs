@@ -168,6 +168,40 @@ public class QuestradeTokenStoreTests : IAsyncLifetime, IDisposable
     }
 
     [Fact]
+    public async Task Clearing_removes_the_stored_token()
+    {
+        // Recovery depends on this: while a dead token remains stored it is preferred over the
+        // configured bootstrap token, and the user has no way back in short of a manual DELETE.
+        var keys = Keys("primary");
+
+        await using (var db = _fixture.CreateContext())
+        {
+            await NewStore(db, keys).SaveAsync("about-to-be-rejected");
+            await NewStore(db, keys).ClearAsync();
+        }
+
+        await using (var db = _fixture.CreateContext())
+        {
+            var rows = await db.Database
+                .SqlQueryRaw<long>("SELECT count(*) AS \"Value\" FROM questrade_token")
+                .SingleAsync();
+
+            Assert.Equal(0, rows);
+            Assert.Null(await NewStore(db, keys).ReadAsync());
+        }
+    }
+
+    [Fact]
+    public async Task Clearing_an_empty_store_is_not_an_error()
+    {
+        // The authenticator clears on every 400, including ones where nothing was stored — a
+        // throw here would replace the actionable re-authorization failure with a database one.
+        await using var db = _fixture.CreateContext();
+        await NewStore(db, Keys("primary")).ClearAsync();
+        Assert.Null(await NewStore(db, Keys("primary")).ReadAsync());
+    }
+
+    [Fact]
     public async Task Reading_an_empty_store_returns_null()
     {
         await using var db = _fixture.CreateContext();
