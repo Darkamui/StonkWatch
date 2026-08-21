@@ -77,9 +77,6 @@ public class LiveWatchlistPollWorker(
                 _skipping = false;
             }
 
-            using var scope = scopeFactory.CreateScope();
-            var job = scope.ServiceProvider.GetRequiredService<LiveWatchlistPollJob>();
-
             // A real tick touches the authenticator itself (the resolver and quote client
             // both call GetSessionAsync), so this resets the keepalive clock regardless of
             // whether the tick itself succeeds.
@@ -87,6 +84,13 @@ public class LiveWatchlistPollWorker(
 
             try
             {
+                // CreateScope() and resolving the job both live inside this try: a scope the
+                // DI container fails to build is exactly as much "one bad tick" as a job that
+                // throws once it's running, and must not kill the loop for the rest of the
+                // process either.
+                using var scope = scopeFactory.CreateScope();
+                var job = scope.ServiceProvider.GetRequiredService<LiveWatchlistPollJob>();
+
                 await job.RunAsync(stoppingToken);
             }
             catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)

@@ -85,6 +85,51 @@ public class LiveWatchlistPollWorkerTests(PostgresFixture fixture) : IAsyncLifet
             Task.FromResult<IReadOnlyDictionary<int, decimal>>(new Dictionary<int, decimal>());
     }
 
+    /// <summary>
+    /// Wraps a real scope factory but throws on its first call only — simulates the DI
+    /// container itself failing to build a tick's scope (e.g. a transient resource exhaustion),
+    /// which is a different failure point than anything inside the job.
+    /// </summary>
+    private sealed class FlakyScopeFactory(IServiceScopeFactory inner) : IServiceScopeFactory
+    {
+        private int _calls;
+
+        public int Calls => Volatile.Read(ref _calls);
+
+        public IServiceScope CreateScope()
+        {
+            if (Interlocked.Increment(ref _calls) == 1)
+            {
+                throw new InvalidOperationException("Simulated scope-creation failure on the first tick.");
+            }
+
+            return inner.CreateScope();
+        }
+    }
+
+    /// <summary>
+    /// Throws an exception the job's own catch (QuestradeReauthorizationRequiredException only)
+    /// does not anticipate on the first call, then resolves normally — models a failure mode
+    /// inside the tick itself, as opposed to <see cref="FlakyScopeFactory"/>'s failure to even
+    /// start one.
+    /// </summary>
+    private sealed class ThrowOnceResolver(Dictionary<string, int> map) : IQuestradeSymbolResolver
+    {
+        private int _calls;
+
+        public Task<IReadOnlyDictionary<string, int>> ResolveAsync(
+            IReadOnlyCollection<string> tickers, CancellationToken ct = default)
+        {
+            if (Interlocked.Increment(ref _calls) == 1)
+            {
+                throw new InvalidOperationException("Simulated resolver failure on the first tick.");
+            }
+
+            return Task.FromResult<IReadOnlyDictionary<string, int>>(
+                tickers.Where(map.ContainsKey).ToDictionary(t => t, t => map[t]));
+        }
+    }
+
     // ---- helpers ----------------------------------------------------------------------------
 
     private static async Task WaitUntilAsync(Func<bool> condition, TimeSpan timeout)
@@ -144,9 +189,11 @@ public class LiveWatchlistPollWorkerTests(PostgresFixture fixture) : IAsyncLifet
             await AdvanceInStepsAsync(time, TimeSpan.FromHours(1), 14);
             await WaitUntilAsync(() => auth.Calls >= 2, TimeSpan.FromSeconds(10));
 
-            Assert.True(auth.Calls >= 2, $"Expected at least 2 keepalive refreshes, got {auth.Calls}.");
-            // Not called on every skipped tick: 14 ticks, far fewer than 14 refreshes.
-            Assert.True(auth.Calls < 14, $"Expected far fewer than 14 refreshes, got {auth.Calls}.");
+            // Exactly 2: the first-tick touch (hour 1, nothing touched yet) and the re-fire
+            // once more than 12 hours have elapsed since (hour 13). A looser bound here would
+            // let an off-by-one in the window arithmetic — or a change that halves
+            // TokenKeepaliveHours — through undetected.
+            Assert.Equal(2, auth.Calls);
         }
         finally
         {
@@ -233,6 +280,102 @@ public class LiveWatchlistPollWorkerTests(PostgresFixture fixture) : IAsyncLifet
         }
         finally
         {
+            await worker.StopAsync(CancellationToken.None);
+        }
+    }
+
+    // ---------- I-1 / I-2 fix: one bad tick must not stop the ones after it ----------
+
+    [Fact]
+    public async Task A_scope_creation_failure_on_one_tick_does_not_stop_the_worker()
+    {
+        var time = new FakeTimeProvider(Start);
+        var cache = new LiveQuoteCache(time);
+        var auth = new CountingAuthenticator();
+
+        var (watchlist, db) = NewWatchlistService();
+        await using var _ = db;
+        await watchlist.AddItemAsync(new CreateWatchlistItemRequest("AAPL"));
+
+        var quoteClient = new CountingQuoteClient();
+        var job = new LiveWatchlistPollJob(
+            watchlist, new FakeResolver(new Dictionary<string, int> { ["AAPL"] = 1 }), quoteClient,
+            cache, time, Options.Create(new LiveWatchlistOptions()),
+            NullLogger<LiveWatchlistPollJob>.Instance);
+
+        var services = new ServiceCollection();
+        services.AddSingleton(job);
+        await using var provider = services.BuildServiceProvider();
+        var flakyFactory = new FlakyScopeFactory(provider.GetRequiredService<IServiceScopeFactory>());
+
+        var log = new CapturingLogger<LiveWatchlistPollWorker>();
+        var options = Options.Create(new LiveWatchlistOptions { PollSeconds = 3 });
+        var worker = new LiveWatchlistPollWorker(flakyFactory, cache, auth, time, options, log);
+
+        var subscription = cache.SubscribeAsync(CancellationToken.None).GetAsyncEnumerator();
+
+        await worker.StartAsync(CancellationToken.None);
+        try
+        {
+            // The first tick's CreateScope() throws before the job even runs; a later tick
+            // must still reach the quote client rather than the loop dying silently.
+            await AdvanceInStepsAsync(time, TimeSpan.FromSeconds(3), 4);
+            await WaitUntilAsync(() => quoteClient.QuoteCalls > 0, TimeSpan.FromSeconds(10));
+
+            Assert.True(quoteClient.QuoteCalls > 0, "A later tick must still reach the quote client.");
+            Assert.True(flakyFactory.Calls >= 2, "The failing first tick must not stop later ticks from trying again.");
+            Assert.NotEmpty(log.AtLevel(LogLevel.Error));
+        }
+        finally
+        {
+            await subscription.DisposeAsync();
+            await worker.StopAsync(CancellationToken.None);
+        }
+    }
+
+    [Fact]
+    public async Task A_tick_that_throws_something_the_job_did_not_anticipate_does_not_stop_the_worker()
+    {
+        var time = new FakeTimeProvider(Start);
+        var cache = new LiveQuoteCache(time);
+        var auth = new CountingAuthenticator();
+
+        var (watchlist, db) = NewWatchlistService();
+        await using var _ = db;
+        await watchlist.AddItemAsync(new CreateWatchlistItemRequest("AAPL"));
+
+        var quoteClient = new CountingQuoteClient();
+        var job = new LiveWatchlistPollJob(
+            watchlist, new ThrowOnceResolver(new Dictionary<string, int> { ["AAPL"] = 1 }), quoteClient,
+            cache, time, Options.Create(new LiveWatchlistOptions()),
+            NullLogger<LiveWatchlistPollJob>.Instance);
+
+        var services = new ServiceCollection();
+        services.AddSingleton(job);
+        await using var provider = services.BuildServiceProvider();
+        var scopeFactory = provider.GetRequiredService<IServiceScopeFactory>();
+
+        var log = new CapturingLogger<LiveWatchlistPollWorker>();
+        var options = Options.Create(new LiveWatchlistOptions { PollSeconds = 3 });
+        var worker = new LiveWatchlistPollWorker(scopeFactory, cache, auth, time, options, log);
+
+        var subscription = cache.SubscribeAsync(CancellationToken.None).GetAsyncEnumerator();
+
+        await worker.StartAsync(CancellationToken.None);
+        try
+        {
+            // The first tick's resolver throws an exception the job's own catch does not
+            // anticipate; a later tick must still reach the quote client, and the worker's
+            // catch-all must log exactly one error for the tick that failed.
+            await AdvanceInStepsAsync(time, TimeSpan.FromSeconds(3), 4);
+            await WaitUntilAsync(() => quoteClient.QuoteCalls > 0, TimeSpan.FromSeconds(10));
+
+            Assert.True(quoteClient.QuoteCalls > 0, "A later tick must still reach the quote client.");
+            Assert.Single(log.AtLevel(LogLevel.Error));
+        }
+        finally
+        {
+            await subscription.DisposeAsync();
             await worker.StopAsync(CancellationToken.None);
         }
     }
