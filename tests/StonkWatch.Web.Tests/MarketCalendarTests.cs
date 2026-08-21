@@ -149,4 +149,16 @@ public class MarketCalendarTests
     {
         Assert.Equal(new DateOnly(2027, 1, 11), MarketCalendar.SessionDate(Est(2027, 1, 11, 9, 30)));
     }
+
+    [Fact]
+    public void SessionDate_is_dst_aware_not_pinned_to_a_fixed_utc_offset()
+    {
+        // 04:30 UTC on 1 August is 00:30 EDT (UTC-4) the same calendar day. A DST-blind
+        // implementation pinned to a fixed -05:00 would answer 31 July instead — the two
+        // winter-only tests above can't tell the difference because EDT and EST agree on the
+        // date for the instants they use.
+        var instant = new DateTimeOffset(2026, 8, 1, 4, 30, 0, TimeSpan.Zero);
+
+        Assert.Equal(new DateOnly(2026, 8, 1), MarketCalendar.SessionDate(instant));
+    }
 }

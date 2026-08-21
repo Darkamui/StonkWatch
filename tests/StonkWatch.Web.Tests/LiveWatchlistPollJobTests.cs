@@ -355,6 +355,39 @@ public class LiveWatchlistPollJobTests(PostgresFixture fixture) : IAsyncLifetime
     }
 
     [Fact]
+    public async Task The_MaxSymbols_cap_truncates_the_list_and_logs_exactly_one_warning_per_tick()
+    {
+        _time.SetUtcNow(RegularHours);
+        var (watchlist, db) = NewWatchlistService(); // default cap 50 — allows adding all three
+        await using var _ = db;
+        await watchlist.AddItemAsync(new CreateWatchlistItemRequest("AAPL"));
+        await watchlist.AddItemAsync(new CreateWatchlistItemRequest("MSFT"));
+        await watchlist.AddItemAsync(new CreateWatchlistItemRequest("GOOG"));
+
+        var resolver = new FakeResolver(new Dictionary<string, int> { ["AAPL"] = 1, ["MSFT"] = 2, ["GOOG"] = 3 });
+        var client = new FakeQuoteClient
+        {
+            Quotes = new Dictionary<int, QuestradeQuote>
+            {
+                [1] = new QuestradeQuote(1, "AAPL", 150.00m, 150.50m, 1),
+                [2] = new QuestradeQuote(2, "MSFT", 300.00m, 301.00m, 2),
+                [3] = new QuestradeQuote(3, "GOOG", 140.00m, 141.00m, 3)
+            }
+        };
+        var cache = new LiveQuoteCache(_time);
+        var log = new CapturingLogger<LiveWatchlistPollJob>();
+        // The job's own cap (2), independent of the watchlist's own cap used above to allow
+        // adding all three rows in the first place.
+        var job = NewJob(watchlist, resolver, client, cache, log, maxSymbols: 2);
+
+        await job.RunAsync();
+
+        var call = Assert.Single(resolver.Calls);
+        Assert.Equal(2, call.Count);
+        Assert.Single(log.AtLevel(LogLevel.Warning));
+    }
+
+    [Fact]
     public async Task An_empty_watchlist_does_not_call_the_resolver_or_the_client()
     {
         _time.SetUtcNow(RegularHours);

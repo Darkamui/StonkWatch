@@ -118,9 +118,9 @@ public class LiveWatchlistPollJob(
 
             decimal? extendedPrice = null;
             DateTimeOffset? extendedAt = null;
-            if (!regularHours
-                && quote.LastTradePrice is not null
-                && quote.LastTradePrice != quote.LastTradePriceTrHrs)
+            // quote.LastTradePrice cannot be null here: !regularHours means price was assigned
+            // from it just above, and a null price already `continue`d before this point.
+            if (!regularHours && quote.LastTradePrice != quote.LastTradePriceTrHrs)
             {
                 // Set together or not at all: LiveQuoteCache.Merge judges freshness by
                 // ExtendedAt, so a price without its own timestamp would mislabel when it

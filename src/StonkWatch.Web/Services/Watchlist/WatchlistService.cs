@@ -26,7 +26,9 @@ public class WatchlistService(
         .Select(ToDto).ToList();
 
     public Task<List<string>> ListSymbolsAsync(CancellationToken ct = default) =>
-        db.WatchlistItems.AsNoTracking().Select(i => i.Symbol).ToListAsync(ct);
+        db.WatchlistItems.AsNoTracking()
+            .OrderBy(i => i.SortOrder).ThenBy(i => i.Symbol)
+            .Select(i => i.Symbol).ToListAsync(ct);
 
     // ---------- Items ----------
 

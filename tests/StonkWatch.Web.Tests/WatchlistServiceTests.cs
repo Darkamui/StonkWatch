@@ -179,6 +179,28 @@ public class WatchlistServiceTests(PostgresFixture fixture) : IAsyncLifetime
     }
 
     [Fact]
+    public async Task ListSymbolsAsync_orders_by_sort_order_like_ListItemsAsync()
+    {
+        // LiveWatchlistPollJob.MaxSymbols takes the first N of whatever this returns, so an
+        // arbitrary storage order would make "the first N" undefined and let the polled set
+        // change between ticks. Ordering must match ListItemsAsync's own SortOrder-then-Symbol.
+        var (service, db) = NewService();
+        await using var _ = db;
+        var group = await service.AddGroupAsync(new CreateWatchlistGroupRequest("SPACE"));
+        var a = await service.AddItemAsync(new CreateWatchlistItemRequest("AAA"));
+        var b = await service.AddItemAsync(new CreateWatchlistItemRequest("BBB"));
+
+        await service.ReorderAsync(new ReorderRequest([
+            new ReorderEntry(b.Id, group.Id, 0),
+            new ReorderEntry(a.Id, group.Id, 1),
+        ]));
+
+        var symbols = await service.ListSymbolsAsync();
+
+        Assert.Equal(["BBB", "AAA"], symbols);
+    }
+
+    [Fact]
     public async Task UpdateGroupAsync_renames_the_group()
     {
         var (service, db) = NewService();
