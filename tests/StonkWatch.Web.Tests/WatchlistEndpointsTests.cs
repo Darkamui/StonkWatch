@@ -99,15 +99,76 @@ public class WatchlistEndpointsTests(PostgresFixture fixture) : IAsyncLifetime
     }
 
     [Fact]
+    public async Task Adding_an_item_with_a_null_symbol_returns_400()
+    {
+        using var factory = NewFactory();
+        using var client = factory.CreateClient();
+        client.DefaultRequestHeaders.Add("X-Api-Key", TestApiKey);
+
+        // Raw JSON rather than the typed request record: {"symbol":null} is what a
+        // natural-language MCP call or a hand-rolled HTTP client can send, and the guard
+        // this test covers exists specifically to turn that into a 400 instead of a 500.
+        using var content = new StringContent(
+            """{"symbol":null}""", System.Text.Encoding.UTF8, "application/json");
+
+        var response = await client.PostAsync("/api/watchlist/items", content);
+
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task Reordering_with_a_null_items_list_returns_400()
+    {
+        using var factory = NewFactory();
+        using var client = factory.CreateClient();
+        client.DefaultRequestHeaders.Add("X-Api-Key", TestApiKey);
+
+        using var content = new StringContent(
+            """{"items":null}""", System.Text.Encoding.UTF8, "application/json");
+
+        var response = await client.PostAsync("/api/watchlist/reorder", content);
+
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+    }
+
+    [Fact]
     public async Task Stream_returns_503_when_the_live_feed_is_disabled()
     {
         using var factory = NewFactory(); // LiveWatchlist:Enabled = false
         using var client = factory.CreateClient();
         client.DefaultRequestHeaders.Add("X-Api-Key", TestApiKey);
 
-        var response = await client.GetAsync("/api/watchlist/stream");
+        // Bounded the same way as its two siblings below: without this, a regression that
+        // makes the 503 branch hang falls back to HttpClient's implicit 100s default
+        // instead of failing promptly.
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+
+        using var request = new HttpRequestMessage(HttpMethod.Get, "/api/watchlist/stream");
+        using var response = await client.SendAsync(
+            request, HttpCompletionOption.ResponseHeadersRead, cts.Token);
 
         Assert.Equal(HttpStatusCode.ServiceUnavailable, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task Unauthenticated_stream_requests_are_rejected_even_when_the_feature_is_enabled()
+    {
+        using var factory = NewFactory(liveWatchlistEnabled: true);
+        // Redirects off, same reasoning as Unauthenticated_requests_are_rejected: a client
+        // that follows the cookie challenge's 302 would report the login page as a 200.
+        using var client = factory.CreateClient(
+            new WebApplicationFactoryClientOptions { AllowAutoRedirect = false });
+
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        using var request = new HttpRequestMessage(HttpMethod.Get, "/api/watchlist/stream");
+        using var response = await client.SendAsync(
+            request, HttpCompletionOption.ResponseHeadersRead, cts.Token);
+
+        // The feature is enabled here specifically so a 503 from the disabled-feature gate
+        // cannot be mistaken for the auth guard actually doing its job.
+        Assert.True(
+            response.StatusCode is HttpStatusCode.Unauthorized or HttpStatusCode.Redirect,
+            $"expected a challenge, got {response.StatusCode}");
     }
 
     [Fact]
@@ -185,23 +246,115 @@ public class WatchlistEndpointsTests(PostgresFixture fixture) : IAsyncLifetime
         Assert.Equal(0, cache.SubscriberCount);
     }
 
+    [Fact]
+    public async Task A_symbol_added_after_the_stream_opens_still_receives_updates()
+    {
+        using var factory = NewFactory(liveWatchlistEnabled: true);
+        using var client = factory.CreateClient();
+        client.DefaultRequestHeaders.Add("X-Api-Key", TestApiKey);
+        await client.PostAsJsonAsync("/api/watchlist/items", new CreateWatchlistItemRequest("ASTS"));
+
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+
+        using var request = new HttpRequestMessage(HttpMethod.Get, "/api/watchlist/stream");
+        using var response = await client.SendAsync(
+            request, HttpCompletionOption.ResponseHeadersRead, cts.Token);
+        response.EnsureSuccessStatusCode();
+
+        await using var stream = await response.Content.ReadAsStreamAsync(cts.Token);
+        using var reader = new StreamReader(stream);
+
+        // Drain the opening burst (ASTS only — NVDA doesn't exist on the watchlist yet).
+        await ReadNextEventDataAsync(reader, cts.Token);
+
+        var cache = factory.Services.GetRequiredService<LiveQuoteCache>();
+        await WaitForAsync(() => cache.SubscriberCount == 1, cts.Token);
+
+        // Added *after* the connection opened: the map the endpoint built at connection
+        // time has no entry for NVDA. Without the server-side refresh this covers, the
+        // tick below is silently dropped rather than reaching this client.
+        await client.PostAsJsonAsync("/api/watchlist/items", new CreateWatchlistItemRequest("NVDA"));
+        cache.ApplyTrade(new Trade("NVDA", 900.12m, DateTimeOffset.UtcNow));
+
+        var tickRow = DeserializeRow(await ReadNextEventDataAsync(reader, cts.Token));
+        Assert.Equal("NVDA", tickRow.Symbol);
+        Assert.Equal(900.12m, tickRow.Last);
+    }
+
+    [Fact]
+    public async Task Stream_sends_a_ping_keepalive_when_idle()
+    {
+        using var factory = new WebApplicationFactory<Program>().WithWebHostBuilder(builder =>
+        {
+            builder.UseSetting("ConnectionStrings:StonkWatch", fixture.ConnectionString);
+            builder.UseSetting("Auth:ApiKey", TestApiKey);
+            builder.UseSetting("Auth:AllowedEmail", "test@example.com");
+            builder.UseSetting("Auth:Google:ClientId", "test-client-id");
+            builder.UseSetting("Auth:Google:ClientSecret", "test-client-secret");
+            builder.UseSetting("LiveWatchlist:Enabled", "true");
+            // Sub-second isn't representable by the int option, so this drives the
+            // shortest interval that still proves the mechanism: short enough that a
+            // 10s-bounded test comfortably observes it without waiting for the 20s
+            // production default.
+            builder.UseSetting("LiveWatchlist:KeepaliveSeconds", "1");
+            builder.UseSetting("Monitoring:Enabled", "false");
+        });
+        using var client = factory.CreateClient();
+        client.DefaultRequestHeaders.Add("X-Api-Key", TestApiKey);
+        await client.PostAsJsonAsync("/api/watchlist/items", new CreateWatchlistItemRequest("ASTS"));
+
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        using var request = new HttpRequestMessage(HttpMethod.Get, "/api/watchlist/stream");
+        using var response = await client.SendAsync(
+            request, HttpCompletionOption.ResponseHeadersRead, cts.Token);
+        response.EnsureSuccessStatusCode();
+
+        await using var stream = await response.Content.ReadAsStreamAsync(cts.Token);
+        using var reader = new StreamReader(stream);
+
+        // Opening burst, a real "quote" event, sent no matter the keepalive interval.
+        var burst = await ReadNextEventAsync(reader, cts.Token);
+        Assert.Equal("quote", burst.EventType);
+
+        // No trade is ever applied here — the only thing that can produce a second event
+        // is the keepalive itself, which is exactly what this test needs to isolate it
+        // from real data events.
+        var idle = await ReadNextEventAsync(reader, cts.Token);
+        Assert.Equal("ping", idle.EventType);
+    }
+
     /// <summary>
     /// Reads lines until the next SSE "data:" field, ignoring "event:", blank, and id
     /// lines. Bounded by <paramref name="ct"/>: a missing event either times out (the
     /// token fires) or the stream closes and this throws; it never hangs silently.
     /// </summary>
-    private static async Task<string> ReadNextEventDataAsync(StreamReader reader, CancellationToken ct)
+    private static async Task<string> ReadNextEventDataAsync(StreamReader reader, CancellationToken ct) =>
+        (await ReadNextEventAsync(reader, ct)).Data;
+
+    /// <summary>
+    /// Reads one full SSE event (its "event:" field, if present, and its "data:" field),
+    /// ignoring blank and id lines. Bounded by <paramref name="ct"/>: a missing event
+    /// either times out (the token fires) or the stream closes and this throws; it never
+    /// hangs silently.
+    /// </summary>
+    private static async Task<(string? EventType, string Data)> ReadNextEventAsync(
+        StreamReader reader, CancellationToken ct)
     {
+        string? eventType = null;
         string? line;
         while ((line = await reader.ReadLineAsync(ct)) is not null)
         {
-            if (line.StartsWith("data:", StringComparison.Ordinal))
+            if (line.StartsWith("event:", StringComparison.Ordinal))
             {
-                return line["data:".Length..].TrimStart();
+                eventType = line["event:".Length..].TrimStart();
+            }
+            else if (line.StartsWith("data:", StringComparison.Ordinal))
+            {
+                return (eventType, line["data:".Length..].TrimStart());
             }
         }
 
-        throw new InvalidOperationException("SSE stream ended before a data event arrived.");
+        throw new InvalidOperationException("SSE stream ended before an event arrived.");
     }
 
     private static async Task WaitForAsync(

@@ -33,7 +33,7 @@ public class WatchlistService(
     public async Task<WatchlistItemDto> AddItemAsync(
         CreateWatchlistItemRequest request, CancellationToken ct = default)
     {
-        var symbol = Normalize(request.Symbol);
+        var symbol = Normalize(request.Symbol ?? "");
         if (string.IsNullOrWhiteSpace(symbol))
         {
             throw new ValidationException("Symbol is required.");
@@ -213,6 +213,11 @@ public class WatchlistService(
 
     public async Task ReorderAsync(ReorderRequest request, CancellationToken ct = default)
     {
+        if (request.Items is null)
+        {
+            throw new ValidationException("Items is required.");
+        }
+
         var ids = request.Items.Select(e => e.Id).ToHashSet();
         var items = await db.WatchlistItems.Where(i => ids.Contains(i.Id)).ToListAsync(ct);
         var byId = items.ToDictionary(i => i.Id);

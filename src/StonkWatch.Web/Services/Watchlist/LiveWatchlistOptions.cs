@@ -23,4 +23,14 @@ public class LiveWatchlistOptions
     /// </summary>
     [Range(1, 500)]
     public int MaxSymbols { get; set; } = 50;
+
+    /// <summary>
+    /// How long the SSE stream can go without a real data event before it sends a
+    /// keepalive. <c>Program.cs</c> documents a reverse proxy in front, and proxies commonly
+    /// drop idle upstream connections around 60s; outside market hours this stream can
+    /// otherwise sit silent indefinitely. Configurable (rather than a hardcoded constant) so
+    /// a test can drive it sub-second.
+    /// </summary>
+    [Range(1, 300)]
+    public int KeepaliveSeconds { get; set; } = 20;
 }
