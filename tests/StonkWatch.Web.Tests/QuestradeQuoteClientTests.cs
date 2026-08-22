@@ -53,6 +53,18 @@ public class QuestradeQuoteClientTests
         }
     }
 
+    private sealed class ThrowingHandler(Func<Exception> makeException) : HttpMessageHandler
+    {
+        public int Count { get; private set; }
+
+        protected override Task<HttpResponseMessage> SendAsync(
+            HttpRequestMessage request, CancellationToken cancellationToken)
+        {
+            Count++;
+            throw makeException();
+        }
+    }
+
     // ---- helpers ------------------------------------------------------------------------
 
     private static HttpResponseMessage Respond(string body, HttpStatusCode status = HttpStatusCode.OK) =>
@@ -147,6 +159,45 @@ public class QuestradeQuoteClientTests
         var result = await client.GetQuotesAsync([1]);
 
         Assert.Empty(result);
+    }
+
+    // ---------- fix round 3 table row 3: invalidate-and-retry-once must not fire on a --------
+    // ---------- non-401 failure, whether it's a status code or a transport-level throw -------
+
+    [Fact]
+    public async Task A_500_does_not_invalidate_the_session()
+    {
+        // Invalidate-and-retry-once is a 401-only policy. Widening SendWithRetryAsync's
+        // `if (response.StatusCode == HttpStatusCode.Unauthorized)` to something broader like
+        // `!response.IsSuccessStatusCode` would silently double the request count (and burn an
+        // Invalidate()) on every ordinary server error, not just an expired token.
+        var handler = new SequencedHandler((_, _) => Respond("upstream boom", HttpStatusCode.InternalServerError));
+        var auth = new RecordingAuthenticator("secret-access-token");
+        var client = NewClient(handler, auth);
+
+        var result = await client.GetQuotesAsync([1]);
+
+        Assert.Empty(result);
+        Assert.Equal(0, auth.InvalidateCalls);
+        Assert.Equal(1, handler.Count); // no retry either — a 500 is answered once, not chased
+    }
+
+    [Fact]
+    public async Task A_transport_failure_does_not_invalidate_the_session()
+    {
+        // A socket reset / DNS failure throws before any response exists — there is no status
+        // code to read at all. It must never reach the invalidate-and-retry path, which needs a
+        // response to inspect. QuestradeQuoteClient's own docs say a transport failure
+        // propagates to the caller by design (the worker's catch-all handles it); this pins that
+        // it does so without burning a perfectly good token first.
+        var handler = new ThrowingHandler(() => new HttpRequestException("Connection reset by peer."));
+        var auth = new RecordingAuthenticator("secret-access-token");
+        var client = NewClient(handler, auth);
+
+        await Assert.ThrowsAsync<HttpRequestException>(() => client.GetQuotesAsync([1]));
+
+        Assert.Equal(0, auth.InvalidateCalls);
+        Assert.Equal(1, handler.Count);
     }
 
     [Fact]
