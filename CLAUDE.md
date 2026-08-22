@@ -66,8 +66,8 @@ Things that will bite if you change this code:
 
 ## Current state
 
-- **329 tests** in `tests/StonkWatch.Web.Tests`. Keep them green; add to them.
-- **Tier 2 (AI research) and the live watchlist are not built.** See
+- **335 tests** in `tests/StonkWatch.Web.Tests`. Keep them green; add to them.
+- **The live watchlist is built.** Tier 2 (AI research) is not — see
   [docs/tech-assessment.md](docs/tech-assessment.md) for the agreed approach before starting.
 - Migrations are applied deliberately, never at startup.
 - UI culture is pinned to `en-CA` in `Program.cs` so prices never render as `302,53`.

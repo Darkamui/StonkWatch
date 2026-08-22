@@ -115,7 +115,7 @@ curl -X POST https://<host>/api/questrade/authorize \
   -d '{"refreshToken":"<paste the token from the portal>"}'
 ```
 
-or from the browser UI once signed in (cookie auth also works on this route). Check the
+or from any signed-in browser session, since the route also accepts cookie auth. Check the
 connection any time with `GET /api/questrade/status`, which reports `{"connected":true}` or
 `{"connected":false,"reason":"..."}` — the reason is always a fixed, actionable string, never
 the token itself.
@@ -134,10 +134,14 @@ database automatically, so there's nothing to clean up by hand.
    token in the Questrade portal and POST it as above; no restart, no config change. This is
    how you should always expect to recover.
 2. **Set `Questrade:BootstrapRefreshToken` and restart** — the fallback, useful when path 1
-   isn't reachable (e.g. the app won't start at all). It only takes effect once the stored
-   token has been rejected and cleared — which happens automatically the next time the app
-   attempts a refresh with it — because a live stored token is always preferred over the
-   bootstrap value. Setting the bootstrap token does not itself force that clearing.
+   isn't reachable (e.g. the app won't start at all). A live stored token is always preferred
+   over the bootstrap value, so if a readable one is still on file this takes effect only once
+   that stored token has been rejected and cleared — which happens automatically the next time
+   the app attempts a refresh with it; setting the bootstrap token does not itself force that
+   clearing. If instead the stored token can't be decrypted at all (the key-ring-reset case
+   below), there is nothing to prefer it over — `ReadAsync` treats that row as if it were
+   absent, so the bootstrap value applies immediately on the next refresh attempt, no rejection
+   required.
 
 **Why the app refuses to start:** the refresh token is stored encrypted at rest, keyed to the
 Data Protection key ring. Without `DataProtectionKeysPath` set, ASP.NET Core still hands out a
