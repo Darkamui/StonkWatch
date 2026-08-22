@@ -10,6 +10,7 @@ using StonkWatch.Web.Data;
 using StonkWatch.Web.Endpoints;
 using StonkWatch.Web.Services;
 using StonkWatch.Web.Services.MarketData;
+using StonkWatch.Web.Services.MarketData.Questrade;
 using StonkWatch.Web.Services.Monitoring;
 using StonkWatch.Web.Services.Notifications;
 using StonkWatch.Web.Services.Watchlist;
@@ -46,6 +47,14 @@ builder.Services.AddOptions<MonitoringOptions>()
 builder.Services.AddOptions<LiveWatchlistOptions>()
     .Bind(builder.Configuration.GetSection(LiveWatchlistOptions.SectionName))
     .ValidateDataAnnotations();
+
+builder.Services.AddOptions<QuestradeOptions>()
+    .Bind(builder.Configuration.GetSection(QuestradeOptions.SectionName))
+    .ValidateDataAnnotations();
+
+var questradeEnabled = builder.Configuration
+    .GetSection(QuestradeOptions.SectionName)
+    .GetValue<bool>(nameof(QuestradeOptions.Enabled));
 
 // Both registered unconditionally: the watchlist can be curated with the live feed switched
 // off. The cache is inert without something feeding it, and registering it always means the
@@ -85,9 +94,75 @@ if (monitoringEnabled)
     builder.Services.AddHostedService<PriceCheckWorker>();
 }
 
+// Questrade is opt-in for the same reason monitoring is: a developer running locally should
+// not open upstream connections or spend API calls by accident.
+if (questradeEnabled)
+{
+    builder.Services.AddScoped<IQuestradeTokenStore, QuestradeTokenStore>();
+
+    // Named, not typed: QuestradeAuthenticator is a singleton (it caches the live session
+    // across the whole process), and AddHttpClient<TClient,TImplementation> always registers
+    // the typed client as transient. A named client plus a hand-written singleton factory is
+    // how a class needing an HttpClient stays a singleton. The 20s timeout is required, not
+    // optional — RefreshAsync deliberately never propagates the caller's CancellationToken
+    // past its semaphore (cancelling mid-exchange is how a single-use refresh token gets
+    // lost), so HttpClient.Timeout is the only bound on a refresh, and the 100s default would
+    // hold the single-flight gate closed that whole time.
+    builder.Services.AddHttpClient("QuestradeAuth", client =>
+        client.Timeout = TimeSpan.FromSeconds(20));
+    builder.Services.AddSingleton<IQuestradeAuthenticator>(sp => new QuestradeAuthenticator(
+        sp.GetRequiredService<IHttpClientFactory>().CreateClient("QuestradeAuth"),
+        sp.GetRequiredService<IServiceScopeFactory>(),
+        sp.GetRequiredService<IOptions<QuestradeOptions>>(),
+        sp.GetRequiredService<TimeProvider>(),
+        sp.GetRequiredService<ILogger<QuestradeAuthenticator>>()));
+
+    // Same reasoning as the authenticator: the resolver caches resolved symbolIds for the
+    // process lifetime, so it has to be a singleton too, which means the same named-client
+    // workaround. No explicit timeout here — the default is fine for a symbol search.
+    builder.Services.AddHttpClient("QuestradeSymbols");
+    builder.Services.AddSingleton<IQuestradeSymbolResolver>(sp => new QuestradeSymbolResolver(
+        sp.GetRequiredService<IHttpClientFactory>().CreateClient("QuestradeSymbols"),
+        sp.GetRequiredService<IQuestradeAuthenticator>(),
+        sp.GetRequiredService<TimeProvider>(),
+        sp.GetRequiredService<ILogger<QuestradeSymbolResolver>>()));
+
+    // The quote client has no per-tick state to cache, so the ordinary typed-client
+    // registration (and its default lifetime) is fine. No BaseAddress: the base URL comes
+    // from session.ApiServer at call time and changes between sessions.
+    builder.Services.AddHttpClient<IQuestradeQuoteClient, QuestradeQuoteClient>();
+
+    builder.Services.AddScoped<LiveWatchlistPollJob>();
+
+    var liveWatchlistEnabled = builder.Configuration
+        .GetSection(LiveWatchlistOptions.SectionName)
+        .GetValue<bool>(nameof(LiveWatchlistOptions.Enabled));
+
+    // Both flags, not just this one: Questrade can be connected with the poll worker off
+    // (nothing to poll for yet), and the live watchlist can be curated with Questrade off.
+    if (liveWatchlistEnabled)
+    {
+        builder.Services.AddHostedService<LiveWatchlistPollWorker>();
+    }
+}
+
 // Without this, keys used to protect the auth cookie and antiforgery tokens live only in the
 // container's writable layer and are regenerated on every restart, signing everyone out each time.
 var dataProtectionKeysPath = builder.Configuration["DataProtectionKeysPath"];
+
+// Data Protection resolves today even without the block below — Razor Pages pulls in
+// antiforgery, which registers it transitively. That's a dependency nobody declared, and now
+// that the encrypted refresh token rides on it too, a silent lockout on the next restart is
+// not acceptable: fail fast instead, the same way Auth:AllowedEmail does.
+if (questradeEnabled && string.IsNullOrEmpty(dataProtectionKeysPath))
+{
+    throw new InvalidOperationException(
+        "Questrade:Enabled is true but DataProtectionKeysPath is not configured. Without "
+        + "persisted Data Protection keys, the encrypted Questrade refresh token becomes "
+        + "undecryptable on the next restart, silently locking out the connection. Set "
+        + "DataProtectionKeysPath to a persistent directory before enabling Questrade.");
+}
+
 if (!string.IsNullOrEmpty(dataProtectionKeysPath))
 {
     builder.Services.AddDataProtection()
@@ -206,6 +281,14 @@ app.MapRazorPages();
 app.MapCandidateEndpoints();
 app.MapAlertEndpoints();
 app.MapWatchlistEndpoints();
+
+// Registered only when the feature is on: with it off the routes must not exist at all,
+// rather than exist and 500 on a service that was never registered.
+if (questradeEnabled)
+{
+    app.MapQuestradeEndpoints();
+}
+
 app.MapMcp("/mcp").RequireAuthorization("ApiKey");
 
 app.Run();
