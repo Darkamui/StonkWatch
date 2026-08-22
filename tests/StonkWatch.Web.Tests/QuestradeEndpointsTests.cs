@@ -77,6 +77,10 @@ public class QuestradeEndpointsTests(PostgresFixture fixture) : IAsyncLifetime, 
     private static Func<HttpRequestMessage, Task<HttpResponseMessage>> AlwaysRejects() =>
         _ => Task.FromResult(Json("""{"error":"invalid_grant"}""", HttpStatusCode.BadRequest));
 
+    /// <summary>Answers 500 to every request — a transient Questrade outage, not a bad token.</summary>
+    private static Func<HttpRequestMessage, Task<HttpResponseMessage>> AlwaysFails() =>
+        _ => Task.FromResult(Json("""{"error":"server_error"}""", HttpStatusCode.InternalServerError));
+
     // ---- factory --------------------------------------------------------------------------
 
     private WebApplicationFactory<Program> NewFactory(
@@ -174,6 +178,28 @@ public class QuestradeEndpointsTests(PostgresFixture fixture) : IAsyncLifetime, 
     }
 
     [Fact]
+    public async Task Status_reports_disconnected_instead_of_500_when_Questrade_is_unreachable()
+    {
+        // A transient Questrade 5xx surfaces from GetSessionAsync as InvalidOperationException,
+        // not QuestradeReauthorizationRequiredException — the contract is "connected means the
+        // session call succeeded", and a transient failure must still answer 200 with
+        // connected:false, not escape as a 500 from the one endpoint operations.md tells an
+        // operator to check when something looks wrong.
+        using var factory = NewFactory(
+            bootstrapRefreshToken: "bootstrap-token", questradeAuthHandler: AlwaysFails());
+        using var client = factory.CreateClient();
+        client.DefaultRequestHeaders.Add("X-Api-Key", TestApiKey);
+
+        var response = await client.GetAsync("/api/questrade/status");
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var status = await response.Content.ReadFromJsonAsync<QuestradeStatusDto>();
+        Assert.NotNull(status);
+        Assert.False(status.Connected);
+        Assert.False(string.IsNullOrWhiteSpace(status.Reason));
+    }
+
+    [Fact]
     public async Task Authorize_stores_the_token_and_reports_success()
     {
         var seenBodies = new List<string>();
@@ -237,6 +263,61 @@ public class QuestradeEndpointsTests(PostgresFixture fixture) : IAsyncLifetime, 
         Assert.True(status.Connected);
     }
 
+    [Fact]
+    public async Task Authorize_invalidates_the_cached_session_so_the_new_token_is_actually_presented()
+    {
+        // Unlike Authorize_stores_the_token_and_reports_success, this establishes a *live,
+        // unexpired* cached session before authorizing — the case the other test cannot reach,
+        // because a fresh factory never has one. If the handler skipped Invalidate(),
+        // GetSessionAsync's TryGetLiveSession fast path would return the cached session without
+        // ever presenting the newly submitted token to "Questrade" — /authorize would still
+        // report success, just not honestly. The stub only accepts OLD-TOKEN once (the initial
+        // bootstrap refresh) and NEW-TOKEN thereafter, so a second presentation of OLD-TOKEN —
+        // which is all a skipped Invalidate() would ever produce, since the cached path makes
+        // no outbound call at all — would either be silently absent from seenBodies or rejected.
+        var oldTokenUses = 0;
+        var seenBodies = new List<string>();
+        Func<HttpRequestMessage, Task<HttpResponseMessage>> handler = async request =>
+        {
+            var body = request.Content is null ? "" : await request.Content.ReadAsStringAsync();
+            seenBodies.Add(body);
+
+            if (body.Contains("refresh_token=NEW-TOKEN", StringComparison.Ordinal))
+            {
+                return Json(TokenJson("rotated-after-reauthorize"));
+            }
+
+            if (body.Contains("refresh_token=OLD-TOKEN", StringComparison.Ordinal)
+                && Interlocked.Increment(ref oldTokenUses) == 1)
+            {
+                return Json(TokenJson("should-never-be-read"));
+            }
+
+            return Json("""{"error":"invalid_grant"}""", HttpStatusCode.BadRequest);
+        };
+
+        using var factory = NewFactory(bootstrapRefreshToken: "OLD-TOKEN", questradeAuthHandler: handler);
+        using var client = factory.CreateClient();
+        client.DefaultRequestHeaders.Add("X-Api-Key", TestApiKey);
+
+        // Establishes a live cached session via the bootstrap token, well inside the
+        // 1800s-minus-margin cached fast path for the rest of this test.
+        var initialStatus = await client.GetFromJsonAsync<QuestradeStatusDto>("/api/questrade/status");
+        Assert.NotNull(initialStatus);
+        Assert.True(initialStatus.Connected);
+        Assert.Single(seenBodies);
+
+        var response = await client.PostAsJsonAsync(
+            "/api/questrade/authorize", new AuthorizeQuestradeRequest("NEW-TOKEN"));
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+
+        // A second request actually reached "Questrade", and it carried the newly submitted
+        // token — not silence from a cached session Invalidate() failed to drop.
+        Assert.Equal(2, seenBodies.Count);
+        Assert.Contains("refresh_token=NEW-TOKEN", seenBodies[1], StringComparison.Ordinal);
+    }
+
     [Theory]
     [InlineData("\"\"")]
     [InlineData("\"   \"")]
@@ -273,6 +354,22 @@ public class QuestradeEndpointsTests(PostgresFixture fixture) : IAsyncLifetime, 
         Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
         var body = await response.Content.ReadAsStringAsync();
         Assert.DoesNotContain(secret, body, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void A_formatted_authorize_request_never_prints_the_refresh_token()
+    {
+        // Records synthesize ToString() over every property, and this one carries a live
+        // Questrade credential straight off the wire. Any structured log call touching the
+        // request — logger.LogInformation("{Request}", request) — goes through this same
+        // ToString()/PrintMembers path, so pinning it here catches that mutation without
+        // needing to capture ASP.NET Core's logging pipeline over HTTP.
+        var request = new AuthorizeQuestradeRequest("SUPER-SECRET-TOKEN");
+
+        var formatted = $"{request}";
+
+        Assert.DoesNotContain("SUPER-SECRET-TOKEN", formatted, StringComparison.Ordinal);
+        Assert.Contains("[redacted]", formatted, StringComparison.Ordinal);
     }
 
     [Theory]
