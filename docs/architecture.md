@@ -196,6 +196,46 @@ Three independent guards stop notification spam: fire only on the transition int
 state; re-arm only once price moves `ReArmPercent` clear of the level; and never notify the
 same alert twice within `MinNotifyHours`. Acknowledging an alert silences it until it re-arms.
 
+## Live watchlist (Questrade)
+
+Opt-in via `Questrade:Enabled` (auth, quotes, symbol resolution) and, separately,
+`LiveWatchlist:Enabled` (the poll worker). With either off, the corresponding pieces below
+are not registered and `/api/questrade/*` doesn't exist. This is a second, independent market
+data path — it shares nothing at runtime with Tier 1 price monitoring, which polls Twelve
+Data on its own schedule for its own purpose (level-crossing alerts, not live display).
+
+```mermaid
+flowchart TB
+    Items["watchlist_items<br/>(Postgres)"] --> Poller["LiveWatchlistPollWorker<br/>BackgroundService + PeriodicTimer"]
+    Poller -->|"new DI scope per tick"| Job["LiveWatchlistPollJob"]
+    Job --> Resolver["IQuestradeSymbolResolver<br/>ticker → Questrade symbolId, cached"]
+    Job --> Quotes["IQuestradeQuoteClient"]
+    Quotes --> Auth["IQuestradeAuthenticator<br/>singleton, single-flight refresh"]
+    Auth -->|"refresh_token"| QT["Questrade OAuth<br/>login.questrade.com"]
+    Auth --> Store["IQuestradeTokenStore<br/>Data-Protection-encrypted, Postgres"]
+    Quotes --> Cache["LiveQuoteCache<br/>in-memory, latest quote per symbol"]
+    Cache --> Sse["SSE endpoint<br/>TypedResults.ServerSentEvents"]
+    Sse --> Sidebar["Browser sidebar"]
+```
+
+Worth knowing:
+
+1. **`IQuestradeAuthenticator` and `IQuestradeSymbolResolver` are singletons**, not scoped —
+   both cache state (the live session; resolved symbol IDs) across the whole poll loop, not
+   per tick. `IQuestradeAuthenticator` reaches the scoped `IQuestradeTokenStore` through
+   `IServiceScopeFactory`, the same pattern `PriceCheckWorker` uses to reach a scoped
+   `DbContext` from a singleton-shaped background loop.
+2. **The refresh token is the one secret this app persists**, not just configures — see
+   [conventions.md](conventions.md#security) for why that's the documented exception, and
+   [operations.md](operations.md#questrade-live-watchlist) for the two recovery paths when it
+   dies.
+3. **`QuestradeReauthorizationRequiredException` is non-fatal to the poll worker.** A dead
+   token means that tick's quotes are stale, not that the worker should stop — the next tick
+   tries again, and `/api/questrade/status` is what surfaces the problem to a human.
+4. **The `/api/questrade/authorize` and `/status` endpoints never return a session value** —
+   only `connected: bool` and, on `/status`, a fixed non-token `reason` string. The access
+   token and `api_server` never leave `IQuestradeAuthenticator`.
+
 ## Deployment topology
 
 ```mermaid

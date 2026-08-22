@@ -48,7 +48,7 @@ All configuration comes from environment variables or `dotnet user-secrets`. In 
 | `Auth:Google:ClientSecret` | ✅ | OAuth client secret from Google Cloud Console |
 | `Auth:AllowedEmail` | ✅ | The one Google account allowed to sign in; every other Google login is rejected |
 | `Auth:ApiKey` | ✅ | Shared secret for `/api/*` and `/mcp` |
-| `DataProtectionKeysPath` | in containers | Directory for cookie/antiforgery keys. Unset in a container ⇒ everyone is signed out on every restart. |
+| `DataProtectionKeysPath` | in containers, and whenever Questrade is enabled | Directory for cookie/antiforgery keys, and the only thing that lets the encrypted Questrade refresh token survive a restart. Unset in a container ⇒ everyone is signed out on every restart. Unset with `Questrade:Enabled=true` ⇒ the app refuses to start (see Questrade below). |
 
 Nothing sensitive belongs in `appsettings.json` — it is committed.
 
@@ -89,6 +89,70 @@ dotnet user-secrets set "Smtp:Host" "localhost"
 dotnet user-secrets set "Smtp:Port" "1025"
 dotnet user-secrets set "Smtp:Security" "None"
 ```
+
+### Questrade (live watchlist)
+
+All optional. **`Questrade:Enabled` is `false` by default**, and with it off none of
+`IQuestradeAuthenticator`, `IQuestradeSymbolResolver`, `IQuestradeQuoteClient`, or the poll
+worker is registered, and `/api/questrade/*` doesn't exist (a request to it 404s, the same as
+any other unmapped route) — the app behaves exactly as it did before the feature existed.
+
+| Key | Default | Purpose |
+|---|---|---|
+| `Questrade:Enabled` | `false` | Master switch for Questrade auth, the symbol resolver, the quote client, and (if `LiveWatchlist:Enabled` is also true) the poll worker |
+| `Questrade:LoginUrl` | `https://login.questrade.com/oauth2/token` | Questrade's OAuth token endpoint. Only worth changing in tests. |
+| `Questrade:BootstrapRefreshToken` | — | The fallback recovery path — see below. Not needed for day-to-day use once a token is stored. |
+| `DataProtectionKeysPath` | — | **Required** when `Questrade:Enabled` is true. The app fails fast at startup if it's missing — see "Why the app refuses to start" below. |
+
+**Getting a first refresh token**, once, from the
+[Questrade portal](https://login.questrade.com/APIAccess/UserApps.aspx): App Hub → generate a
+personal app token → this gives you a refresh token good for one login. Hand it to the running
+app with:
+
+```bash
+curl -X POST https://<host>/api/questrade/authorize \
+  -H "X-Api-Key: <Auth:ApiKey>" -H "Content-Type: application/json" \
+  -d '{"refreshToken":"<paste the token from the portal>"}'
+```
+
+or from the browser UI once signed in (cookie auth also works on this route). Check the
+connection any time with `GET /api/questrade/status`, which reports `{"connected":true}` or
+`{"connected":false,"reason":"..."}` — the reason is always a fixed, actionable string, never
+the token itself.
+
+**The stored token rotates on every use and expires after about three days of not being
+used.** A poll worker running every few seconds keeps it alive indefinitely on its own; the
+only way to hit the three-day idle expiry is leaving `LiveWatchlist:Enabled` off (or the
+watchlist empty) for that long while `Questrade:Enabled` stays on. When the stored token dies
+— idle expiry, or a key-ring reset (below) — `/api/questrade/status` starts reporting
+`connected: false` and the next thing to poll or refresh clears the dead token from the
+database automatically, so there's nothing to clean up by hand.
+
+**Recovering from a dead or rejected token — two paths, try them in this order:**
+
+1. **`POST /api/questrade/authorize` with a fresh token** — the normal path. Generate a new
+   token in the Questrade portal and POST it as above; no restart, no config change. This is
+   how you should always expect to recover.
+2. **Set `Questrade:BootstrapRefreshToken` and restart** — the fallback, useful when path 1
+   isn't reachable (e.g. the app won't start at all). It only takes effect once the stored
+   token has been rejected and cleared — which happens automatically the next time the app
+   attempts a refresh with it — because a live stored token is always preferred over the
+   bootstrap value. Setting the bootstrap token does not itself force that clearing.
+
+**Why the app refuses to start:** the refresh token is stored encrypted at rest, keyed to the
+Data Protection key ring. Without `DataProtectionKeysPath` set, ASP.NET Core still hands out a
+working `IDataProtectionProvider` — ephemeral, held only in memory — so nothing looks wrong
+until the next restart, when the encrypted token in the database becomes silently
+undecryptable. Rather than fail that way (a connection that quietly stops working days after a
+deploy, with a warning easy to miss in the logs), the app fails loudly at startup instead:
+`Questrade:Enabled=true` with no `DataProtectionKeysPath` throws `InvalidOperationException`
+before the process finishes starting.
+
+**Single instance only.** Refresh tokens are single-use and rotate on every refresh; running
+two instances against one Questrade account means each instance's refresh eventually consumes
+a token the other one needed, locking that instance out. This is the same constraint the app
+already operates under everywhere else (see CLAUDE.md) — Questrade just makes the cost of
+violating it concrete.
 
 ## Deployment
 
@@ -151,6 +215,9 @@ image. For additive migrations either order works.
 | The same alert emails repeatedly | `Monitoring:MinNotifyHours` too low, or price is oscillating wider than `ReArmPercent` | Raise either, or acknowledge the alert to silence it |
 | An alert never re-fires after clearing | Price has not moved `ReArmPercent` past the level | Lower `Monitoring:ReArmPercent` |
 | `/healthz` returns 503 | Postgres unreachable | Check the connection string and that Postgres is up |
+| Startup crash naming `Questrade:Enabled` and `DataProtectionKeysPath` | Questrade enabled without a keys path configured | Set `DataProtectionKeysPath` to a persistent directory (see Questrade above) |
+| `/api/questrade/status` reports `connected: false` | No token stored yet, the stored token expired (idle > ~3 days) or was rejected, or the Data Protection key ring changed | `POST /api/questrade/authorize` with a fresh token from the Questrade portal (see Questrade above) |
+| Questrade connection dies on every restart, even with a token stored | `DataProtectionKeysPath` unset or its volume not mounted, so the key ring regenerates each restart | Set it and mount the same persistent volume used for cookie keys |
 
 ### Backups
 

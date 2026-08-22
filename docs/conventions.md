@@ -212,6 +212,15 @@ public async Task<SomeDto> DoThing(
 - If you add an outbound HTTP client, the API key stays server-side. Never render a
   third-party key into a page or expose it to JavaScript.
 
+**One documented exception**: the Questrade refresh token. It's rotating and single-use — every
+refresh consumes it and returns a new one — so, unlike every other secret, it cannot live in
+configuration; the running app is the only thing that ever sees the current value. It is
+persisted, encrypted at rest via ASP.NET Core Data Protection (`QuestradeTokenStore`), and
+that persistence is the *only* thing that's allowed to happen to it: it must never be logged,
+echoed back in a response, or appear in an exception message, in success or failure. If you
+add another credential that has to rotate the same way, follow this shape rather than putting
+it in configuration.
+
 ## Pull request checklist
 
 - [ ] Business logic is in `Services/`, not in an adapter
