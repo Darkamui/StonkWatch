@@ -11,50 +11,43 @@ public class LiveQuoteCacheTests
     private static LiveQuoteCache NewCache() => new(new FakeTimeProvider(Now));
 
     [Fact]
-    public void ApplyTrade_sets_the_last_price()
-    {
-        var cache = NewCache();
-
-        cache.ApplyTrade(new Trade("ASTS", 67.61m, Now));
-
-        Assert.Equal(67.61m, cache.Get("ASTS")!.Last);
-    }
-
-    [Fact]
-    public void ApplyTrade_discards_a_trade_older_than_the_one_already_stored()
-    {
-        var cache = NewCache();
-        cache.ApplyTrade(new Trade("ASTS", 67.61m, Now));
-
-        cache.ApplyTrade(new Trade("ASTS", 60.00m, Now.AddSeconds(-5)));
-
-        // Out-of-order delivery must never rewind a price.
-        Assert.Equal(67.61m, cache.Get("ASTS")!.Last);
-    }
-
-    [Fact]
-    public void ApplySnapshot_does_not_overwrite_a_newer_live_price()
-    {
-        var cache = NewCache();
-        cache.ApplyTrade(new Trade("ASTS", 67.61m, Now));
-
-        cache.ApplySnapshot(
-            new Quote("ASTS", 60.00m, Now.AddMinutes(-3), Volume: 5_030_000), Session);
-
-        // The slow REST poll must not stomp a fresh tick...
-        Assert.Equal(67.61m, cache.Get("ASTS")!.Last);
-        // ...but its own fields still land.
-        Assert.Equal(5_030_000L, cache.Get("ASTS")!.Volume);
-    }
-
-    [Fact]
-    public void ApplySnapshot_sets_the_last_price_when_no_live_tick_has_arrived()
+    public void ApplySnapshot_sets_the_last_price_on_a_symbol_not_seen_before()
     {
         var cache = NewCache();
 
         cache.ApplySnapshot(new Quote("ASTS", 60.00m, Now), Session);
 
         Assert.Equal(60.00m, cache.Get("ASTS")!.Last);
+    }
+
+    [Fact]
+    public void ApplySnapshot_does_not_rewind_the_price_from_a_stale_snapshot()
+    {
+        var cache = NewCache();
+        cache.ApplySnapshot(new Quote("ASTS", 67.61m, Now), Session);
+
+        cache.ApplySnapshot(
+            new Quote("ASTS", 60.00m, Now.AddMinutes(-3), Volume: 5_030_000), Session);
+
+        // A poll delivered out of order — a retry, or a slow response overtaken by the next
+        // cycle — must never rewind the price...
+        Assert.Equal(67.61m, cache.Get("ASTS")!.Last);
+        // ...but a field the stored quote never had still lands, since it is judged on its
+        // own clock rather than the price's.
+        Assert.Equal(5_030_000L, cache.Get("ASTS")!.Volume);
+    }
+
+    [Fact]
+    public void ApplySnapshot_leaves_the_price_alone_on_an_exact_timestamp_tie()
+    {
+        var cache = NewCache();
+        cache.ApplySnapshot(new Quote("ASTS", 67.61m, Now), Session);
+
+        cache.ApplySnapshot(new Quote("ASTS", 60.00m, Now), Session);
+
+        // Ties go to what is already stored, so two snapshots landing in the same instant
+        // cannot flap the displayed price.
+        Assert.Equal(67.61m, cache.Get("ASTS")!.Last);
     }
 
     [Fact]
@@ -136,9 +129,9 @@ public class LiveQuoteCacheTests
             new Quote("ASTS", 60.00m, Now, ExtendedPrice: 61.00m, ExtendedAt: Now.AddMinutes(30)),
             Session);
 
-        // TwelveDataQuoteProvider parses ExtendedPrice and ExtendedAt independently, so a
-        // payload can produce one without the other. Taking the price alone would stamp a
-        // fresh price with a stale timestamp — a wrong claim about when it happened.
+        // Both-or-neither is the contract for producers, but the cache does not trust it: a
+        // payload can still arrive with one and not the other. Taking the price alone would
+        // stamp a fresh price with a stale timestamp — a wrong claim about when it happened.
         cache.ApplySnapshot(
             new Quote("ASTS", 63.00m, Now.AddMinutes(10), ExtendedPrice: 65.20m, ExtendedAt: null),
             Session);
@@ -161,7 +154,7 @@ public class LiveQuoteCacheTests
     public void ChangePercent_is_null_without_a_previous_close()
     {
         var cache = NewCache();
-        cache.ApplyTrade(new Trade("ASTS", 67.61m, Now));
+        cache.ApplySnapshot(new Quote("ASTS", 67.61m, Now), Session);
 
         Assert.Null(cache.Get("ASTS")!.ChangePercent);
     }
@@ -194,8 +187,8 @@ public class LiveQuoteCacheTests
     public void Snapshot_returns_every_applied_quote()
     {
         var cache = NewCache();
-        cache.ApplyTrade(new Trade("ASTS", 67.61m, Now));
-        cache.ApplyTrade(new Trade("SPCE", 3.10m, Now));
+        cache.ApplySnapshot(new Quote("ASTS", 67.61m, Now), Session);
+        cache.ApplySnapshot(new Quote("SPCE", 3.10m, Now), Session);
 
         var snapshot = cache.Snapshot();
 
@@ -208,7 +201,7 @@ public class LiveQuoteCacheTests
     public void Forget_drops_the_symbol()
     {
         var cache = NewCache();
-        cache.ApplyTrade(new Trade("ASTS", 67.61m, Now));
+        cache.ApplySnapshot(new Quote("ASTS", 67.61m, Now), Session);
 
         cache.Forget("ASTS");
 
@@ -219,7 +212,7 @@ public class LiveQuoteCacheTests
     public void Symbols_are_matched_case_insensitively()
     {
         var cache = NewCache();
-        cache.ApplyTrade(new Trade("ASTS", 67.61m, Now));
+        cache.ApplySnapshot(new Quote("ASTS", 67.61m, Now), Session);
 
         Assert.NotNull(cache.Get("asts"));
     }
@@ -231,29 +224,35 @@ public class LiveQuoteCacheTests
         using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
 
         var enumerator = cache.SubscribeAsync(cts.Token).GetAsyncEnumerator(cts.Token);
-        cache.ApplyTrade(new Trade("ASTS", 67.61m, Now));
+        cache.ApplySnapshot(new Quote("ASTS", 67.61m, Now), Session);
 
         Assert.True(await enumerator.MoveNextAsync());
         Assert.Equal(67.61m, enumerator.Current.Last);
     }
 
     [Fact]
-    public async Task SubscribeAsync_does_not_publish_a_discarded_trade()
+    public async Task SubscribeAsync_never_publishes_a_rewound_price_from_a_stale_snapshot()
     {
         var cache = NewCache();
         using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
-        cache.ApplyTrade(new Trade("ASTS", 67.61m, Now));
+        cache.ApplySnapshot(new Quote("ASTS", 67.61m, Now), Session);
 
         var enumerator = cache.SubscribeAsync(cts.Token).GetAsyncEnumerator(cts.Token);
-        cache.ApplyTrade(new Trade("ASTS", 60.00m, Now.AddSeconds(-5)));  // stale, ignored
-        cache.ApplyTrade(new Trade("ASTS", 68.00m, Now.AddSeconds(1)));   // accepted
+        cache.ApplySnapshot(new Quote("ASTS", 60.00m, Now.AddSeconds(-5)), Session);  // stale
+        cache.ApplySnapshot(new Quote("ASTS", 68.00m, Now.AddSeconds(1)), Session);   // wins
+
+        // Every snapshot publishes a frame, including one that lost the merge outright.
+        // What matters is that the frame carries the *merged* quote, so a subscriber never
+        // sees the stale 60.00 on the wire — only the price that survived.
+        Assert.True(await enumerator.MoveNextAsync());
+        Assert.Equal(67.61m, enumerator.Current.Last);
 
         Assert.True(await enumerator.MoveNextAsync());
         Assert.Equal(68.00m, enumerator.Current.Last);
     }
 
     [Fact]
-    public async Task SubscribeAsync_fans_a_trade_out_to_every_subscriber()
+    public async Task SubscribeAsync_fans_a_quote_out_to_every_subscriber()
     {
         var cache = NewCache();
         using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
@@ -261,7 +260,7 @@ public class LiveQuoteCacheTests
         var first = cache.SubscribeAsync(cts.Token).GetAsyncEnumerator(cts.Token);
         var second = cache.SubscribeAsync(cts.Token).GetAsyncEnumerator(cts.Token);
 
-        cache.ApplyTrade(new Trade("ASTS", 67.61m, Now));
+        cache.ApplySnapshot(new Quote("ASTS", 67.61m, Now), Session);
 
         Assert.True(await first.MoveNextAsync());
         Assert.Equal(67.61m, first.Current.Last);
@@ -281,7 +280,7 @@ public class LiveQuoteCacheTests
         // Get the enumerator into a "suspended mid-iteration" state (rather than disposing
         // one that never ran) so DisposeAsync deterministically unwinds through the
         // iterator's try/finally instead of being a no-op on a never-started state machine.
-        cache.ApplyTrade(new Trade("ASTS", 67.61m, Now));
+        cache.ApplySnapshot(new Quote("ASTS", 67.61m, Now), Session);
         Assert.True(await enumerator.MoveNextAsync());
 
         await enumerator.DisposeAsync();
@@ -296,7 +295,7 @@ public class LiveQuoteCacheTests
         using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
 
         var enumerator = cache.SubscribeAsync(cts.Token).GetAsyncEnumerator(cts.Token);
-        cache.ApplyTrade(new Trade("ASTS", 67.61m, Now));
+        cache.ApplySnapshot(new Quote("ASTS", 67.61m, Now), Session);
         await enumerator.MoveNextAsync();
 
         await enumerator.DisposeAsync();
@@ -306,7 +305,7 @@ public class LiveQuoteCacheTests
     }
 
     [Fact]
-    public async Task ApplyTrade_and_ApplySnapshot_interleaved_from_two_threads_agree_with_Get()
+    public async Task ApplySnapshot_interleaved_from_two_threads_agrees_with_Get()
     {
         // Regression for the race where install (atomic) and publish (not part of the same
         // atomic step) could happen in opposite order between two ingest threads: thread A
@@ -316,7 +315,9 @@ public class LiveQuoteCacheTests
         // installed, must never be followed by an older one on the wire.
         //
         // Two real OS threads, started together off a Barrier (no Task.Delay anywhere), hammer
-        // the same symbol via ApplyTrade and ApplySnapshot with strictly increasing timestamps.
+        // the same symbol via ApplySnapshot with strictly increasing timestamps. One writer is
+        // all production runs today, but the invariant under test is the lock's, not the poll
+        // worker's, and a second concurrent caller is what makes a violation observable.
         // Several hundred extra, otherwise-unused subscribers are registered first: Publish
         // fans out to every subscriber in a loop, so with more of them that loop takes
         // measurably longer, widening the gap between "install" and "publish" that the race
@@ -340,15 +341,15 @@ public class LiveQuoteCacheTests
         const int iterations = 20_000;
         using var barrier = new Barrier(2);
 
-        var tradeThread = new Thread(() =>
+        var priceThread = new Thread(() =>
         {
             barrier.SignalAndWait();
             for (var i = 1; i <= iterations; i++)
             {
-                cache.ApplyTrade(new Trade("ASTS", 100m + i, Now.AddMilliseconds(i)));
+                cache.ApplySnapshot(new Quote("ASTS", 100m + i, Now.AddMilliseconds(i)), Session);
             }
         });
-        var snapshotThread = new Thread(() =>
+        var volumeThread = new Thread(() =>
         {
             barrier.SignalAndWait();
             for (var i = 1; i <= iterations; i++)
@@ -358,7 +359,7 @@ public class LiveQuoteCacheTests
             }
         });
 
-        // A sentinel trade, applied only after both racers have joined, deterministically
+        // A sentinel snapshot, applied only after both racers have joined, deterministically
         // marks the end of the race on the wire: the reader stops as soon as it sees it, so
         // nothing timing-dependent decides when the assertion window closes.
         const decimal sentinel = -1m;
@@ -387,11 +388,11 @@ public class LiveQuoteCacheTests
         });
 
         reader.Start();
-        tradeThread.Start();
-        snapshotThread.Start();
-        tradeThread.Join();
-        snapshotThread.Join();
-        cache.ApplyTrade(new Trade("ASTS", sentinel, Now.AddDays(1)));
+        priceThread.Start();
+        volumeThread.Start();
+        priceThread.Join();
+        volumeThread.Join();
+        cache.ApplySnapshot(new Quote("ASTS", sentinel, Now.AddDays(1)), Session);
         reader.Join();
 
         Assert.Null(violation);
@@ -413,7 +414,7 @@ public class LiveQuoteCacheTests
 
         var enumerator = cache.SubscribeAsync(subscribeCts.Token).GetAsyncEnumerator(enumerationCts.Token);
 
-        cache.ApplyTrade(new Trade("ASTS", 67.61m, Now));
+        cache.ApplySnapshot(new Quote("ASTS", 67.61m, Now), Session);
         Assert.True(await enumerator.MoveNextAsync());
 
         subscribeCts.Cancel();
@@ -454,7 +455,7 @@ public class LiveQuoteCacheTests
     // (SubscriberCount == 1, and the second reader never receives the trade within the 5s
     // guard) against that implementation.
     [Fact]
-    public async Task Enumerating_the_same_subscription_twice_registers_two_subscribers_that_both_receive_a_trade()
+    public async Task Enumerating_the_same_subscription_twice_registers_two_subscribers_that_both_receive_a_quote()
     {
         var cache = NewCache();
         using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
@@ -465,7 +466,7 @@ public class LiveQuoteCacheTests
 
         Assert.Equal(2, cache.SubscriberCount);
 
-        cache.ApplyTrade(new Trade("ASTS", 67.61m, Now));
+        cache.ApplySnapshot(new Quote("ASTS", 67.61m, Now), Session);
 
         var firstMoveNext = first.MoveNextAsync().AsTask();
         var secondMoveNext = second.MoveNextAsync().AsTask();

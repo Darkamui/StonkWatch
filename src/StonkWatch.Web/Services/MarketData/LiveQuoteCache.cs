@@ -17,7 +17,10 @@ namespace StonkWatch.Web.Services.MarketData;
 /// channel), so the lock is held only for plain in-memory work. A single lock, rather than
 /// per-symbol locks or a lock-free structure, is deliberate: at the watchlist's scale
 /// (dozens of symbols) contention is not a concern, and it is what lets install-then-publish
-/// be one atomic step (see <see cref="ApplyTrade"/> / <see cref="ApplySnapshot"/>).
+/// be one atomic step (see <see cref="ApplySnapshot"/>). AddOrUpdate alone would make only
+/// the install atomic; two ingest threads could then install in one order and publish in the
+/// other, leaving every subscriber's last frame disagreeing with what <see cref="Get"/>
+/// returns.
 /// </remarks>
 public sealed class LiveQuoteCache(TimeProvider timeProvider)
 {
@@ -68,52 +71,12 @@ public sealed class LiveQuoteCache(TimeProvider timeProvider)
     }
 
     /// <summary>
-    /// Applies a live tick. A trade strictly older than the one already stored is discarded:
-    /// providers do not guarantee ordering, and rewinding a price on a late-arriving message
-    /// would show a stale number as if it were current. A trade carrying the *same*
-    /// timestamp as the one already stored still advances Last — two ticks can legitimately
-    /// share a millisecond, and the newer message (by arrival, since it couldn't beat the
-    /// clock) is the one to trust.
-    /// </summary>
-    public void ApplyTrade(Trade trade)
-    {
-        var symbol = Normalize(trade.Symbol);
-
-        // Install and publish must happen as one atomic step. AddOrUpdate alone only makes
-        // the install atomic; two ingest threads (this one and ApplySnapshot's) could then
-        // install in one order and publish in the other, leaving every subscriber's last
-        // frame disagreeing with what Get() returns. Holding _gate across both closes that.
-        lock (_gate)
-        {
-            if (_quotes.TryGetValue(symbol, out var existing))
-            {
-                var changed = existing.LastAt is not { } lastAt || trade.At >= lastAt;
-                if (!changed)
-                {
-                    // A discarded trade must not mutate the table or fan out a quote that
-                    // didn't change.
-                    return;
-                }
-
-                var updated = existing with { Last = trade.Price, LastAt = trade.At };
-                _quotes[symbol] = updated;
-                Publish(updated);
-            }
-            else
-            {
-                var updated = new LiveQuote(symbol, trade.Price, trade.At);
-                _quotes[symbol] = updated;
-                Publish(updated);
-            }
-        }
-    }
-
-    /// <summary>
     /// Applies a REST snapshot. Volume, previous close and extended-hours land only when the
     /// snapshot itself is the freshest source for that field; the price only becomes Last if
-    /// nothing fresher is already stored. Unlike <see cref="ApplyTrade"/>, a snapshot at the
-    /// exact same timestamp as the stored Last does not win — a snapshot is the lower-trust
-    /// source, so a tie leaves what is already there alone.
+    /// nothing fresher is already stored — polls can be delivered out of order (a retry, or a
+    /// slow response overtaken by the next cycle), and rewinding a price would show a stale
+    /// number as if it were current. A snapshot timestamped exactly at the stored Last does
+    /// not win either: ties leave what is already there alone.
     /// </summary>
     /// <param name="session">
     /// The trading session the previous close belongs to. Stored so the worker can tell a
@@ -226,9 +189,9 @@ public sealed class LiveQuoteCache(TimeProvider timeProvider)
     /// would orphan an entry in <see cref="_subscribers"/> forever, and every future
     /// <see cref="Publish"/> would pay for it on every tick.</item>
     /// </list>
-    /// Registration still happens before any caller-issued <c>ApplyTrade</c>/<c>ApplySnapshot</c>
-    /// that follows the first <c>GetAsyncEnumerator</c> call, which is all the ordering the
-    /// subscribe tests below need.
+    /// Registration still happens before any caller-issued <c>ApplySnapshot</c> that follows
+    /// the first <c>GetAsyncEnumerator</c> call, which is all the ordering the subscribe
+    /// tests below need.
     /// </remarks>
     public IAsyncEnumerable<LiveQuote> SubscribeAsync(CancellationToken ct) => new Subscription(this, ct);
 

@@ -208,7 +208,9 @@ public class WatchlistEndpointsTests(PostgresFixture fixture) : IAsyncLifetime
         await WaitForAsync(() => cache.SubscriberCount == 1, cts.Token);
         Assert.Equal(1, cache.SubscriberCount);
 
-        cache.ApplyTrade(new Trade("ASTS", 123.45m, DateTimeOffset.UtcNow));
+        cache.ApplySnapshot(
+            new Quote("ASTS", 123.45m, DateTimeOffset.UtcNow),
+            DateOnly.FromDateTime(DateTime.UtcNow));
 
         var tickRow = DeserializeRow(await ReadNextEventDataAsync(reader, cts.Token));
         Assert.Equal("ASTS", tickRow.Symbol);
@@ -274,7 +276,9 @@ public class WatchlistEndpointsTests(PostgresFixture fixture) : IAsyncLifetime
         // time has no entry for NVDA. Without the server-side refresh this covers, the
         // tick below is silently dropped rather than reaching this client.
         await client.PostAsJsonAsync("/api/watchlist/items", new CreateWatchlistItemRequest("NVDA"));
-        cache.ApplyTrade(new Trade("NVDA", 900.12m, DateTimeOffset.UtcNow));
+        cache.ApplySnapshot(
+            new Quote("NVDA", 900.12m, DateTimeOffset.UtcNow),
+            DateOnly.FromDateTime(DateTime.UtcNow));
 
         var tickRow = DeserializeRow(await ReadNextEventDataAsync(reader, cts.Token));
         Assert.Equal("NVDA", tickRow.Symbol);
