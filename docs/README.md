@@ -51,9 +51,10 @@ StonkWatch/
 │   ├── Mcp/                     ← MCP tool definitions served at /mcp
 │   ├── Pages/                   ← Razor Pages UI
 │   ├── Services/                ← business logic (the only place it lives)
-│   │   ├── MarketData/          ← quote provider (Twelve Data)
+│   │   ├── MarketData/          ← live quote cache; Questrade/ (watchlist), Twelve Data (monitoring)
 │   │   ├── Monitoring/          ← price-check worker, job, level evaluator, calendar
-│   │   └── Notifications/       ← INotifier, SMTP sender, alert digest
+│   │   ├── Notifications/       ← INotifier, SMTP sender, alert digest
+│   │   └── Watchlist/           ← live watchlist service, poll worker and job
 │   └── wwwroot/                 ← static assets, Bootstrap, jQuery
 ├── tests/StonkWatch.Web.Tests/  ← xUnit; Testcontainers for database tests
 ├── docker-compose.dev.yml       ← local Postgres only

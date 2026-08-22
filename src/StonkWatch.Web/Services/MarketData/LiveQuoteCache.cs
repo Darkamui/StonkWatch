@@ -4,12 +4,12 @@ using System.Threading.Channels;
 namespace StonkWatch.Web.Services.MarketData;
 
 /// <summary>
-/// The single source of truth for what every watched symbol is worth right now. Merges a
-/// live trade stream with slow REST snapshots and fans the result out to SSE subscribers.
+/// The single source of truth for what every watched symbol is worth right now. Merges
+/// incoming quotes field by field, newest wins, and fans the result out to SSE subscribers.
 /// </summary>
 /// <remarks>
-/// Singleton, and touched from a websocket read loop, a background worker, and every open
-/// browser connection at once, so every operation must be thread-safe.
+/// Singleton, and touched from the poll worker and every open browser connection at once,
+/// so every operation must be thread-safe.
 ///
 /// All state — the quote table and the subscriber table — is guarded by a single
 /// <see cref="_gate"/>. Nothing here ever awaits while holding it (a channel's
@@ -111,10 +111,9 @@ public sealed class LiveQuoteCache(TimeProvider timeProvider)
     /// <summary>
     /// Applies a REST snapshot. Volume, previous close and extended-hours land only when the
     /// snapshot itself is the freshest source for that field; the price only becomes Last if
-    /// no fresher live tick has arrived — the poll runs minutes behind the stream and must
-    /// never stomp it. Unlike <see cref="ApplyTrade"/>, a snapshot at the exact same
-    /// timestamp as the stored Last does not win: a REST snapshot must never displace an
-    /// equally-timestamped live tick.
+    /// nothing fresher is already stored. Unlike <see cref="ApplyTrade"/>, a snapshot at the
+    /// exact same timestamp as the stored Last does not win — a snapshot is the lower-trust
+    /// source, so a tie leaves what is already there alone.
     /// </summary>
     /// <param name="session">
     /// The trading session the previous close belongs to. Stored so the worker can tell a
@@ -164,9 +163,9 @@ public sealed class LiveQuoteCache(TimeProvider timeProvider)
 
         // ExtendedPrice and ExtendedAt are taken as a unit, both or neither, and judged by
         // ExtendedAt's own clock (it is the actual timestamp of that trade, unlike Volume).
-        // TwelveDataQuoteProvider parses the two independently, so a payload can produce
-        // {ExtendedPrice: 65.20, ExtendedAt: null}; merging the fields independently would
-        // let a fresh price keep a stale timestamp and mislabel when it happened.
+        // Both-or-neither is the contract for producers — merging the fields independently
+        // would let a {ExtendedPrice: 65.20, ExtendedAt: null} payload pair a fresh price
+        // with a stale timestamp and mislabel when it happened.
         var extendedFresher = quote.ExtendedPrice is not null && quote.ExtendedAt is not null
             && (existing.ExtendedAt is null || quote.ExtendedAt > existing.ExtendedAt);
 
