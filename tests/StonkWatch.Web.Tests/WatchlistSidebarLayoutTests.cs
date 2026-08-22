@@ -41,14 +41,32 @@ public class WatchlistSidebarLayoutTests(PostgresFixture fixture) : IAsyncLifeti
         // An anonymous visitor has no watchlist, and every /api/watchlist route is
         // authenticated — a sidebar here would poll its way to a 401 loop.
         //
-        // Note what this does and does not pin. Today the login page renders through
-        // _LoginLayout, which has no sidebar markup at all, so this passes without
-        // exercising _Layout's `User.Identity?.IsAuthenticated` guard. It is still worth
-        // keeping: it is the property a reader actually cares about, and it catches the
-        // realistic regression of the sidebar being moved into a shared layout or
-        // _LoginLayout being pointed at _Layout. The auth guard itself is unpinned —
-        // asserting it needs an authenticated cookie session, and this app signs in
-        // through Google OAuth, which no test drives.
+        // This one passes by construction: the login page renders through _LoginLayout,
+        // which has no sidebar markup at all. It is kept for the regression it does catch
+        // — _LoginLayout being pointed at _Layout, or the sidebar being hoisted into a
+        // layout both share. The _Layout guard itself is pinned by the test below.
+        Assert.DoesNotContain("watchlist-sidebar", html);
+        Assert.DoesNotContain("watchlist.js", html);
+    }
+
+    [Fact]
+    public async Task An_anonymous_page_on_the_main_layout_does_not_render_the_sidebar()
+    {
+        using var factory = NewFactory();
+        using var client = factory.CreateClient(
+            new WebApplicationFactoryClientOptions { AllowAutoRedirect = false });
+
+        // /Error is the one page that is both AllowAnonymous (Program.cs) and rendered
+        // through _Layout (_ViewStart), which makes it the only way to exercise the
+        // layout's `User.Identity?.IsAuthenticated` guard without a signed-in cookie —
+        // this app authenticates through Google OAuth, which no test can drive. Remove
+        // that guard and this goes red; without this test it goes unnoticed, and every
+        // anonymous error page starts a sidebar that can only 401.
+        var response = await client.GetAsync("/Error");
+        var html = await response.Content.ReadAsStringAsync();
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.Contains("navbar-brand", html);          // _Layout really did render
         Assert.DoesNotContain("watchlist-sidebar", html);
         Assert.DoesNotContain("watchlist.js", html);
     }
