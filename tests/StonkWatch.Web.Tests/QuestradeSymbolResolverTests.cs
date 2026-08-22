@@ -68,6 +68,30 @@ public class QuestradeSymbolResolverTests
         }
     }
 
+    /// <summary>Numbers each request (1-based) like <see cref="SequencedHandler"/>, but throws a
+    /// transport-level <see cref="HttpRequestException"/> (StatusCode null — no response was ever
+    /// received, unlike a 401) on one chosen call instead of returning a response for it.</summary>
+    private sealed class TransportFailureOnNthHandler(
+        int failOnCall, Func<int, HttpRequestMessage, HttpResponseMessage> respond) : HttpMessageHandler
+    {
+        private int _count;
+
+        public List<HttpRequestMessage> Requests { get; } = [];
+
+        protected override Task<HttpResponseMessage> SendAsync(
+            HttpRequestMessage request, CancellationToken cancellationToken)
+        {
+            var n = Interlocked.Increment(ref _count);
+            Requests.Add(request);
+            if (n == failOnCall)
+            {
+                throw new HttpRequestException("Connection reset by peer.");
+            }
+
+            return Task.FromResult(respond(n, request));
+        }
+    }
+
     private sealed class CountingAuthenticator(QuestradeSession session) : IQuestradeAuthenticator
     {
         private int _invalidateCalls;
@@ -363,5 +387,43 @@ public class QuestradeSymbolResolverTests
 
         Assert.NotEmpty(log.AtLevel(LogLevel.Warning));
         Assert.DoesNotContain(secret, log.AllText, StringComparison.Ordinal);
+    }
+
+    // ---------- fix round 3: N-2, only a persistent 401 may trip the circuit breaker ----------
+
+    [Fact]
+    public async Task A_transport_failure_costs_only_that_ticker_and_the_batch_continues()
+    {
+        // The round-2 fix caught *any* HttpRequestException as a persistent-401 signal, so a
+        // one-off socket reset (StatusCode null, not Unauthorized — no response was ever
+        // received) tripped the batch-wide circuit breaker meant only for a stuck token: the
+        // third ticker's transport failure would have abandoned the fourth and fifth too, even
+        // though nothing was wrong with the token. Widening the catch back to
+        // `catch (HttpRequestException)` — dropping the `when (ex.StatusCode == Unauthorized)`
+        // guard — reproduces exactly that and turns this test red.
+        var handler = new TransportFailureOnNthHandler(failOnCall: 3, respond: (n, request) =>
+        {
+            var ticker = request.RequestUri!.Query.Contains("T1", StringComparison.Ordinal) ? "T1"
+                : request.RequestUri!.Query.Contains("T2", StringComparison.Ordinal) ? "T2"
+                : request.RequestUri!.Query.Contains("T4", StringComparison.Ordinal) ? "T4"
+                : "T5";
+            return Respond(SearchResponse((ticker, "NASDAQ", n)));
+        });
+        var auth = new CountingAuthenticator(Session);
+        var resolver = NewResolver(handler, authenticator: auth);
+
+        var result = await resolver.ResolveAsync(["T1", "T2", "T3", "T4", "T5"]);
+
+        // T3's own lookup throws and is left unresolved for this tick, but T4 and T5 — ordered
+        // after it — still get looked up and resolve: the breaker did not trip.
+        Assert.Equal(1, result["T1"]);
+        Assert.Equal(2, result["T2"]);
+        Assert.DoesNotContain("T3", result.Keys);
+        Assert.Equal(4, result["T4"]);
+        Assert.Equal(5, result["T5"]);
+        Assert.Equal(5, handler.Requests.Count);
+        // A transport failure never reaches a response, so it can't be a 401 and must never
+        // invalidate a perfectly good session.
+        Assert.Equal(0, auth.InvalidateCalls);
     }
 }

@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using System.Net;
 using System.Text.Json;
 
 namespace StonkWatch.Web.Services.MarketData.Questrade;
@@ -159,15 +160,24 @@ public class QuestradeSymbolResolver(
                 http, authenticator, logger, path,
                 session => $"{session.ApiServer}{path}?prefix={Uri.EscapeDataString(ticker)}", ct);
         }
+        catch (HttpRequestException ex) when (ex.StatusCode == HttpStatusCode.Unauthorized)
+        {
+            // QuestradeHttp throws exactly this (StatusCode == Unauthorized) when a second 401
+            // follows the invalidate-and-retry — a persistently stale token, not evidence this
+            // ticker doesn't exist, and not just this ticker's problem either: the same token
+            // will fail the same way for everything else still queued. ResolveAsync logs once
+            // for the whole batch and stops, rather than every LookupAsync call logging (and
+            // every ticker paying) its own invalidate-and-retry.
+            return LookupResult.PersistentAuthFailure;
+        }
         catch (HttpRequestException)
         {
-            // QuestradeHttp throws when a second 401 follows the invalidate-and-retry — a
-            // persistently stale token, not evidence this ticker doesn't exist, and not just
-            // this ticker's problem either: the same token will fail the same way for
-            // everything else still queued. ResolveAsync logs once for the whole batch and
-            // stops, rather than every LookupAsync call logging (and every ticker paying) its
-            // own invalidate-and-retry.
-            return LookupResult.PersistentAuthFailure;
+            // Anything else that reaches here is a transport-level failure (socket reset, DNS,
+            // TLS) — StatusCode is null because no response was ever received. That says
+            // nothing about the token and nothing about any other ticker in the batch, so it
+            // must not trip the persistent-401 circuit breaker above: one bad ticker, not the
+            // rest of the queue. Treat it exactly like any other non-auth failure.
+            return LookupResult.TransientFailure;
         }
 
         using var _ = response;
