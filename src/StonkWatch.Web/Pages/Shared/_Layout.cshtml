@@ -9,6 +9,7 @@
     <link href="https://fonts.googleapis.com/css2?family=Oswald:wght@400;500;600;700&family=Inter:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet" />
     <link rel="stylesheet" href="~/lib/bootstrap/dist/css/bootstrap.min.css" />
     <link rel="stylesheet" href="~/css/site.css" asp-append-version="true" />
+    <link rel="stylesheet" href="~/css/watchlist.css" asp-append-version="true" />
     <link rel="stylesheet" href="~/StonkWatch.Web.styles.css" asp-append-version="true" />
 </head>
 <body>
@@ -75,5 +76,13 @@
     <script src="~/js/site.js" asp-append-version="true"></script>
 
     @await RenderSectionAsync("Scripts", required: false)
+
+    @* Signed-in only: the API routes require authentication, so an anonymous visitor
+       would get nothing but a 401 and a panel stuck on "Loading…". *@
+    @if (User.Identity?.IsAuthenticated == true)
+    {
+        <partial name="_WatchlistSidebar" />
+        <script src="~/js/watchlist.js" asp-append-version="true"></script>
+    }
 </body>
 </html>

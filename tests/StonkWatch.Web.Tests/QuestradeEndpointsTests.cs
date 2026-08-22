@@ -174,7 +174,11 @@ public class QuestradeEndpointsTests(PostgresFixture fixture) : IAsyncLifetime, 
 
         Assert.NotNull(status);
         Assert.False(status.Connected);
-        Assert.False(string.IsNullOrWhiteSpace(status.Reason));
+        // The specific reason, not merely "some reason": every re-authorization message says
+        // Re-authorize, and the transient-failure branch below deliberately does not. Asserting
+        // only that Reason is non-empty would let either branch answer for the other, and they
+        // tell the operator to do opposite things — go get a new token, versus wait.
+        Assert.Contains("Re-authorize", status.Reason, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -196,7 +200,43 @@ public class QuestradeEndpointsTests(PostgresFixture fixture) : IAsyncLifetime, 
         var status = await response.Content.ReadFromJsonAsync<QuestradeStatusDto>();
         Assert.NotNull(status);
         Assert.False(status.Connected);
-        Assert.False(string.IsNullOrWhiteSpace(status.Reason));
+        Assert.Equal(TransientReason, status.Reason);
+    }
+
+    /// <summary>
+    /// The fixed transient-failure reason. Held as a constant so the two status tests assert
+    /// against opposite strings rather than both settling for "non-empty".
+    /// </summary>
+    private const string TransientReason =
+        "Questrade could not be reached; the connection will be retried.";
+
+    [Fact]
+    public async Task Status_survives_a_transport_failure_and_a_timeout_the_same_way_as_a_5xx()
+    {
+        // The catch filter names three exception types. A 5xx (above) covers only
+        // InvalidOperationException; these are the other two arms, which were otherwise
+        // unpinned — widening or narrowing that filter has to break something.
+        Func<HttpRequestMessage, Task<HttpResponseMessage>>[] failures =
+        [
+            _ => Task.FromException<HttpResponseMessage>(new HttpRequestException("socket reset")),
+            _ => Task.FromException<HttpResponseMessage>(new TaskCanceledException("timed out")),
+        ];
+
+        foreach (var failure in failures)
+        {
+            using var factory = NewFactory(
+                bootstrapRefreshToken: "bootstrap-token", questradeAuthHandler: failure);
+            using var client = factory.CreateClient();
+            client.DefaultRequestHeaders.Add("X-Api-Key", TestApiKey);
+
+            var response = await client.GetAsync("/api/questrade/status");
+
+            Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+            var status = await response.Content.ReadFromJsonAsync<QuestradeStatusDto>();
+            Assert.NotNull(status);
+            Assert.False(status.Connected);
+            Assert.Equal(TransientReason, status.Reason);
+        }
     }
 
     [Fact]
@@ -217,9 +257,11 @@ public class QuestradeEndpointsTests(PostgresFixture fixture) : IAsyncLifetime, 
         // Models a real lockout: a dead token is already stored (surviving a restart, same
         // Data Protection provider the app itself uses), and only a freshly submitted token is
         // accepted by "Questrade". This is the amendment's recovery path, verified against the
-        // built code rather than assumed: SaveAsync must overwrite the dead row, Invalidate()
-        // must drop any cached session, and GetSessionAsync must then present the *new* token
-        // rather than the one already stored.
+        // built code rather than assumed: Invalidate() must drop any cached session, and
+        // GetSessionAsync must then present the *new* token rather than the one already stored.
+        // Note SaveAsync is not overwriting a dead row by the time authorize runs — the
+        // pre-check below draws a 400 from "Questrade", and a 400 clears the store — so what
+        // this pins is which token goes out on the wire, not how the row got replaced.
         await SeedStoredTokenAsync(factory, "DEAD-STORED-TOKEN");
 
         using var client = factory.CreateClient();

@@ -66,9 +66,11 @@ Things that will bite if you change this code:
 
 ## Current state
 
-- **335 tests** in `tests/StonkWatch.Web.Tests`. Keep them green; add to them.
-- **The live watchlist's backend is built** — Questrade auth, polling, the API and the SSE
-  stream. The sidebar UI is not yet written. Tier 2 (AI research) is not built either — see
+- **339 tests** in `tests/StonkWatch.Web.Tests`. Keep them green; add to them.
+- **The live watchlist is built** — Questrade auth, polling, the API, the SSE stream, and the
+  right-docked sidebar (`_WatchlistSidebar.cshtml` + `wwwroot/js/watchlist.js`), rendered from
+  `_Layout.cshtml` for signed-in users only. Row clicks are deliberately inert for now.
+  **Tier 2 (AI research) is not built** — see
   [docs/tech-assessment.md](docs/tech-assessment.md) for the agreed approach before starting.
 - Migrations are applied deliberately, never at startup.
 - UI culture is pinned to `en-CA` in `Program.cs` so prices never render as `302,53`.

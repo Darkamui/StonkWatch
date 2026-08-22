@@ -1,0 +1,196 @@
+/* ============================================================
+   Live watchlist sidebar — TradingView's density in Night Desk
+   colours. Numerals are monospaced and tabular so digits do not
+   jitter as prices tick.
+   ============================================================ */
+
+:root {
+  /* 340px rather than TradingView's ~300: the spec mandates four data columns
+     (Last, Chg%, Vol, Ext) and Ext does not fit at 300 without dropping one. */
+  --watchlist-width: 340px;
+  --watchlist-rail: 44px;
+}
+
+.watchlist {
+  position: fixed;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  width: var(--watchlist-width);
+  display: flex;
+  flex-direction: column;
+  background: var(--surface);
+  border-left: 1px solid var(--border);
+  z-index: 1030;
+  transition: width 0.15s ease;
+}
+
+.watchlist.is-collapsed { width: var(--watchlist-rail); }
+.watchlist.is-collapsed .watchlist-title,
+.watchlist.is-collapsed .watchlist-cols,
+.watchlist.is-collapsed .watchlist-body,
+.watchlist.is-collapsed .watchlist-status-text { display: none; }
+
+.watchlist-head {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.6rem 0.5rem;
+  border-bottom: 1px solid var(--border-soft);
+}
+
+.watchlist-title {
+  font-family: var(--font-display);
+  font-size: 0.9rem;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--ink-dim);
+  margin: 0;
+}
+
+.watchlist-toggle {
+  background: none;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  color: var(--ink-dim);
+  width: 28px;
+  height: 28px;
+  cursor: pointer;
+  flex: none;
+}
+
+.watchlist-toggle:hover { color: var(--ink); border-color: var(--ink-faint); }
+.watchlist-toggle-icon::before { content: "›"; font-size: 1.1rem; line-height: 1; }
+.watchlist.is-collapsed .watchlist-toggle-icon::before { content: "‹"; }
+
+/* Symbol | Last | Chg% | Vol | Ext — one grid shared by the header and every row so the
+   columns cannot drift apart. */
+.watchlist-cols,
+.watchlist-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 4rem 3.4rem 3.2rem 3.4rem;
+  gap: 0.3rem;
+  align-items: center;
+  padding: 0.3rem 0.55rem;
+}
+
+.watchlist-cols {
+  font-size: 0.68rem;
+  text-transform: uppercase;
+  letter-spacing: 0.07em;
+  color: var(--ink-faint);
+  border-bottom: 1px solid var(--border-soft);
+}
+
+.watchlist-cols > span:not(:first-child),
+.watchlist-row > .num { text-align: right; }
+
+.watchlist-body { overflow-y: auto; flex: 1 1 auto; }
+
+.watchlist-group-head {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  padding: 0.5rem 0.6rem 0.25rem;
+  font-size: 0.68rem;
+  font-weight: 600;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+  color: var(--ink-faint);
+  background: none;
+  border: 0;
+  width: 100%;
+  cursor: pointer;
+}
+
+.watchlist-group-head::before { content: "▾"; font-size: 0.6rem; }
+.watchlist-group.is-collapsed .watchlist-group-head::before { content: "▸"; }
+.watchlist-group.is-collapsed .watchlist-row { display: none; }
+
+.watchlist-row {
+  border-bottom: 1px solid var(--border-soft);
+  font-size: 0.82rem;
+}
+
+.watchlist-row:hover { background: var(--surface-2); }
+
+.watchlist-sym { display: flex; align-items: center; gap: 0.4rem; min-width: 0; }
+
+.watchlist-chip {
+  flex: none;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: var(--surface-3);
+  color: var(--ink-dim);
+  font-size: 0.6rem;
+  font-weight: 700;
+  display: grid;
+  place-items: center;
+}
+
+.watchlist-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--ink);
+}
+
+.num {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  font-size: 0.78rem;
+  color: var(--ink-dim);
+}
+
+.num.up { color: var(--bull); }
+.num.down { color: var(--bear); }
+.num.empty { color: var(--ink-faint); }
+
+/* Flash on tick. Decays quickly: the point is to catch the eye, not to persist. */
+@keyframes watchlist-flash-up   { from { background: rgba(116, 179, 122, 0.22); } to { background: transparent; } }
+@keyframes watchlist-flash-down { from { background: rgba(193, 89, 74, 0.22); }  to { background: transparent; } }
+
+.watchlist-row.flash-up   { animation: watchlist-flash-up 0.6s ease-out; }
+.watchlist-row.flash-down { animation: watchlist-flash-down 0.6s ease-out; }
+
+@media (prefers-reduced-motion: reduce) {
+  .watchlist,
+  .watchlist-row.flash-up,
+  .watchlist-row.flash-down { transition: none; animation: none; }
+}
+
+.watchlist-status {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.4rem 0.6rem;
+  border-top: 1px solid var(--border-soft);
+  font-size: 0.7rem;
+  color: var(--ink-faint);
+}
+
+.watchlist-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--ink-faint);
+  flex: none;
+}
+
+.watchlist-status[data-state="live"] .watchlist-dot { background: var(--bull); }
+.watchlist-status[data-state="error"] .watchlist-dot { background: var(--bear); }
+/* "off" keeps the neutral grey dot: live prices being disabled is a configuration
+   state, not a fault, and a red dot would send the operator hunting for a break. */
+
+.watchlist-empty { padding: 1rem 0.6rem; color: var(--ink-faint); font-size: 0.8rem; }
+
+/* The sidebar is fixed, so page content needs room made for it. */
+body.has-watchlist { padding-right: var(--watchlist-width); }
+body.has-watchlist.watchlist-collapsed { padding-right: var(--watchlist-rail); }
+
+/* Below this width the panel would leave nothing for the page. */
+@media (max-width: 900px) {
+  .watchlist { display: none; }
+  body.has-watchlist { padding-right: 0; }
+}

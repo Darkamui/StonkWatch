@@ -236,6 +236,33 @@ Worth knowing:
    only `connected: bool` and, on `/status`, a fixed non-token `reason` string. The access
    token and `api_server` never leave `IQuestradeAuthenticator`.
 
+### The sidebar
+
+`Pages/Shared/_WatchlistSidebar.cshtml` renders a shell only — a header, a column strip, an
+empty body and a status line. Every row is built by `wwwroot/js/watchlist.js`, so the initial
+paint and every live update go through one code path instead of two that can disagree.
+
+`_Layout.cshtml` includes both **only for signed-in users**: every `/api/watchlist` route is
+authenticated, so an anonymous visitor would get a panel stuck on "Loading…" and a 401 loop.
+The login page uses `_LoginLayout.cshtml` and never sees it.
+
+The script does a `GET /api/watchlist` for the full view, then opens an `EventSource` on
+`/api/watchlist/stream` and patches rows in place. Four things about it are deliberate:
+
+- **The browser never contacts Questrade.** It only calls this app's own routes, on the session
+  cookie. No provider name, key, or token appears anywhere in the markup, CSS, or script.
+- **A missing value renders `—`, never `0`.** The opening burst can arrive with every price
+  null — the poller does nothing while nobody has the sidebar open — and a null `changePercent`
+  is tinted neither green nor red. `0.00%` claims "flat today", which is a different fact.
+- **The `ping` keepalive is ignored on purpose.** It carries `null`, not a row; a listener that
+  parsed it as a quote would throw on the first property access.
+- **A 503 is a state, not a fault.** With the feature switched off the stream never opens; the
+  `EventSource` closes for good rather than retrying, and the status line says "live prices
+  off" with a neutral dot instead of reconnecting forever behind a red one.
+
+Row clicks do nothing yet — rows are focusable and semantic so that wiring them later is a
+behaviour change, not a rebuild.
+
 ## Deployment topology
 
 ```mermaid

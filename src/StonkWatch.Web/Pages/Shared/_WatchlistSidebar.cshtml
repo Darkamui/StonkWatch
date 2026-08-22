@@ -1,0 +1,26 @@
+@* Rows are rendered by watchlist.js from /api/watchlist so that the initial paint and
+   every live update go through exactly one code path. *@
+<aside id="watchlist-sidebar" class="watchlist" aria-label="Live watchlist">
+    <div class="watchlist-head">
+        <button id="watchlist-toggle" class="watchlist-toggle" type="button"
+                aria-expanded="true" aria-controls="watchlist-body"
+                title="Collapse watchlist">
+            <span class="watchlist-toggle-icon" aria-hidden="true"></span>
+            <span class="visually-hidden">Toggle watchlist</span>
+        </button>
+        <h2 class="watchlist-title">Watchlist</h2>
+    </div>
+
+    <div class="watchlist-cols" aria-hidden="true">
+        <span>Symbol</span><span>Last</span><span>Chg%</span><span>Vol</span><span>Ext</span>
+    </div>
+
+    <div id="watchlist-body" class="watchlist-body" role="list">
+        <p class="watchlist-empty">Loading…</p>
+    </div>
+
+    <div id="watchlist-status" class="watchlist-status" data-state="connecting">
+        <span class="watchlist-dot" aria-hidden="true"></span>
+        <span class="watchlist-status-text">connecting…</span>
+    </div>
+</aside>
