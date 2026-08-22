@@ -30,6 +30,18 @@ public static class QuestradeEndpoints
                 // see QuestradeAuthenticator, which is careful never to interpolate one in.
                 return Results.Ok(new QuestradeStatusDto(false, ex.Message));
             }
+            catch (Exception ex) when (
+                ex is InvalidOperationException or HttpRequestException or TaskCanceledException)
+            {
+                // Everything GetSessionAsync can throw that isn't "re-authorize": a Questrade
+                // 5xx or unparseable body, a transport failure, or the 20s timeout expiring.
+                // The contract here is "connected means the session call succeeded" — a
+                // transient failure is connected:false, not a 500 from the one endpoint
+                // operations.md tells a human to check when something looks wrong. The message
+                // is fixed and names no provider detail, so it can never carry a token.
+                return Results.Ok(new QuestradeStatusDto(
+                    false, "Questrade could not be reached; the connection will be retried."));
+            }
         });
 
         group.MapPost("/authorize", async (

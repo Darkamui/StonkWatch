@@ -110,15 +110,22 @@ public class QuestradeEndpointsTests(PostgresFixture fixture) : IAsyncLifetime, 
         });
 
     /// <summary>
-    /// Seeds the questrade_token row directly, protected with the same on-disk key ring the
-    /// app under test will use — modelling a real "dead token survives a restart" lockout
-    /// rather than a token the app could never have decrypted in the first place.
+    /// Seeds the questrade_token row directly, protected with the running app's own
+    /// <see cref="IDataProtectionProvider"/> — not a freestanding one built from the same
+    /// key-ring directory. Data Protection's purpose chain includes the application
+    /// discriminator (<c>SetApplicationName("StonkWatch")</c> in Program.cs), and
+    /// <see cref="DataProtectionProvider.Create(DirectoryInfo)"/> assigns a different one, so
+    /// ciphertext from that overload is silently undecryptable by the app under test — it comes
+    /// back <c>null</c> from <c>ReadAsync</c>, and a test built on it would pass with the seed
+    /// commented out entirely. Resolving the provider from <paramref name="factory"/> after it
+    /// exists is what makes this a real "dead token survives a restart" lockout rather than a
+    /// token the app could never have decrypted in the first place.
     /// </summary>
-    private async Task SeedStoredTokenAsync(string plaintextToken)
+    private async Task SeedStoredTokenAsync(
+        WebApplicationFactory<Program> factory, string plaintextToken)
     {
-        Directory.CreateDirectory(_keysDir);
-        var keys = DataProtectionProvider.Create(new DirectoryInfo(_keysDir));
-        var protector = keys.CreateProtector("StonkWatch.Questrade.RefreshToken");
+        var protector = factory.Services.GetRequiredService<IDataProtectionProvider>()
+            .CreateProtector("StonkWatch.Questrade.RefreshToken");
         var ciphertext = protector.Protect(plaintextToken);
 
         await using var db = fixture.CreateContext();
@@ -169,13 +176,6 @@ public class QuestradeEndpointsTests(PostgresFixture fixture) : IAsyncLifetime, 
     [Fact]
     public async Task Authorize_stores_the_token_and_reports_success()
     {
-        // Models a real lockout: a dead token is already stored (surviving a restart, same
-        // key ring), and only a freshly submitted token is accepted by "Questrade". This is
-        // the amendment's recovery path, verified against the built code rather than assumed:
-        // SaveAsync must overwrite the dead row, Invalidate() must drop any cached session, and
-        // GetSessionAsync must then present the *new* token rather than the one already stored.
-        await SeedStoredTokenAsync("DEAD-STORED-TOKEN");
-
         var seenBodies = new List<string>();
         Func<HttpRequestMessage, Task<HttpResponseMessage>> handler = async request =>
         {
@@ -187,17 +187,46 @@ public class QuestradeEndpointsTests(PostgresFixture fixture) : IAsyncLifetime, 
         };
 
         using var factory = NewFactory(questradeAuthHandler: handler);
+
+        // Models a real lockout: a dead token is already stored (surviving a restart, same
+        // Data Protection provider the app itself uses), and only a freshly submitted token is
+        // accepted by "Questrade". This is the amendment's recovery path, verified against the
+        // built code rather than assumed: SaveAsync must overwrite the dead row, Invalidate()
+        // must drop any cached session, and GetSessionAsync must then present the *new* token
+        // rather than the one already stored.
+        await SeedStoredTokenAsync(factory, "DEAD-STORED-TOKEN");
+
         using var client = factory.CreateClient();
         client.DefaultRequestHeaders.Add("X-Api-Key", TestApiKey);
+
+        // Proves the seed is real, not inert: with no BootstrapRefreshToken configured,
+        // GetSessionAsync only has a token to try at all if ReadAsync actually decrypted the
+        // seeded row. If the seed's ciphertext were unreadable by the app (the exact bug this
+        // test exists to catch), ReadAsync would return null, RefreshAsync would throw before
+        // ever calling "Questrade", and seenBodies would stay empty — a fresh store and a dead
+        // one would then be indistinguishable from here on, which is precisely what made the
+        // old version of this test worthless with the seed commented out.
+        var preCheck = await client.GetFromJsonAsync<QuestradeStatusDto>("/api/questrade/status");
+        Assert.NotNull(preCheck);
+        Assert.False(preCheck.Connected);
+        var preCheckRequest = Assert.Single(seenBodies);
+        Assert.Contains("refresh_token=DEAD-STORED-TOKEN", preCheckRequest, StringComparison.Ordinal);
 
         var response = await client.PostAsJsonAsync(
             "/api/questrade/authorize", new AuthorizeQuestradeRequest("GOOD-NEW-TOKEN"));
 
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
 
-        // Exactly one request reached "Questrade", and it presented the new token, not the
-        // dead one that was sitting in the store beforehand.
-        var request = Assert.Single(seenBodies);
+        // The submitted token must never come back, success or failure — the rejected-token
+        // test below pins the error branch; this pins the success branch, which is the one an
+        // operator actually hits with a live credential in it.
+        var responseBody = await response.Content.ReadAsStringAsync();
+        Assert.DoesNotContain("GOOD-NEW-TOKEN", responseBody, StringComparison.Ordinal);
+
+        // A second request reached "Questrade", and it presented the new token, not the dead
+        // one that was sitting in the store beforehand.
+        Assert.Equal(2, seenBodies.Count);
+        var request = seenBodies[1];
         Assert.Contains("refresh_token=GOOD-NEW-TOKEN", request, StringComparison.Ordinal);
         Assert.DoesNotContain("DEAD-STORED-TOKEN", request, StringComparison.Ordinal);
 
@@ -246,20 +275,30 @@ public class QuestradeEndpointsTests(PostgresFixture fixture) : IAsyncLifetime, 
         Assert.DoesNotContain(secret, body, StringComparison.Ordinal);
     }
 
-    [Fact]
-    public async Task The_questrade_routes_require_authorization()
+    [Theory]
+    [InlineData("GET", "/api/questrade/status")]
+    [InlineData("POST", "/api/questrade/authorize")]
+    public async Task The_questrade_routes_require_authorization(string method, string path)
     {
-        // Enabled specifically so a 404 from the disabled-feature gate can't be mistaken for
-        // the auth guard doing its job.
+        // Both routes, not just /status: /authorize is the one that accepts and persists a
+        // credential, and a mutation that moved only it off the auth group left an earlier,
+        // more narrowly-named version of this test fully green. Enabled specifically so a 404
+        // from the disabled-feature gate can't be mistaken for the auth guard doing its job.
         using var factory = NewFactory(questradeAuthHandler: AlwaysOk());
         using var client = factory.CreateClient(
             new WebApplicationFactoryClientOptions { AllowAutoRedirect = false });
 
-        var response = await client.GetAsync("/api/questrade/status");
+        using var request = new HttpRequestMessage(new HttpMethod(method), path);
+        if (method == "POST")
+        {
+            request.Content = JsonContent.Create(new AuthorizeQuestradeRequest("irrelevant"));
+        }
+
+        var response = await client.SendAsync(request);
 
         Assert.True(
             response.StatusCode is HttpStatusCode.Unauthorized or HttpStatusCode.Redirect,
-            $"expected a challenge, got {response.StatusCode}");
+            $"expected a challenge for {method} {path}, got {response.StatusCode}");
     }
 
     [Fact]
