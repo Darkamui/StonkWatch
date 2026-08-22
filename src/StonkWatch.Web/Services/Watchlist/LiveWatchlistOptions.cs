@@ -12,10 +12,6 @@ public class LiveWatchlistOptions
     /// </summary>
     public bool Enabled { get; set; }
 
-    /// <summary>How often volume and extended-hours prices are refreshed over REST.</summary>
-    [Range(1, 120)]
-    public int SnapshotMinutes { get; set; } = 10;
-
     /// <summary>
     /// One batched Questrade quotes call covers the whole watchlist, so the cap isn't about
     /// staying under a request limit — 50 keeps both the request and the sidebar itself sane.
