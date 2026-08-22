@@ -27,7 +27,7 @@ Full docs live in [`docs/`](docs/README.md) — start there if you're new to the
   (`Services/CandidateService.cs`), JSON API (`Endpoints/`, under `/api/*`), Razor Pages UI
   (`Pages/`), and MCP tools (`Mcp/WatchlistTools.cs`, served at `/mcp`).
 - `docker-compose.dev.yml` — local Postgres container for development only.
-- `docker-compose.yml` / `Dockerfile` — production image + compose file for the VPS.
+- `Dockerfile` — production image, built and pushed to Docker Hub by `.github/workflows/deploy.yml`. The VPS supplies its own run configuration.
 
 ## Quick start
 

@@ -162,24 +162,36 @@ violating it concrete.
 
 ```mermaid
 flowchart LR
-    Dev["git push"] --> VPS["VPS"]
-    VPS --> Build["docker compose up -d --build"]
-    Build --> C["stonkwatch-web :8080"]
+    Dev["git push → master"] --> GHA["GitHub Actions<br/>deploy.yml"]
+    GHA --> Hub[("Docker Hub<br/>stonkwatch:latest")]
+    Hub --> Pull["VPS: docker pull + docker run<br/><i>manual</i>"]
+    Pull --> C["stonkwatch :8080"]
     C --> V[("volume stonkwatch-keys → /keys")]
     C --> PG[("existing Postgres")]
     Proxy["nginx / Caddy / Traefik<br/>TLS"] --> C
     Internet --> Proxy
 ```
 
-1. Copy `.env.example` to `.env` and fill in real values. **Never commit `.env`.**
-2. Give the container a route to Postgres — either publish Postgres's port and use it in
-   `STONKWATCH_DB_CONNECTION_STRING`, or attach the `web` service to Postgres's Docker
-   network (commented-out `networks:` block in `docker-compose.yml`) and use the container
-   name as `Host=`.
-3. Put a reverse proxy in front for TLS. The container serves plain HTTP on 8080 and trusts
+Pushing to `master` builds the image and pushes it to Docker Hub. **It does not touch the
+VPS** — there is no SSH step in the workflow. Nothing changes in production until someone
+pulls, so the build finishing is not a deploy.
+
+This repo ships no production compose file; the VPS runs the container from its own
+configuration. `.env.example` is the catalogue of variables that configuration has to supply
+— `docker-compose.dev.yml` is local Postgres only and is unrelated to deploying.
+
+1. **Apply migrations first** (below). They are never applied at startup, and the watchlist
+   API queries its tables regardless of the feature flags — an unmigrated database means a
+   500 on every page, not a disabled feature.
+2. Give the container a route to Postgres — either publish Postgres's port and use it in the
+   connection string, or attach the container to Postgres's Docker network and use the
+   container name as `Host=`.
+3. Mount a persistent volume at `DataProtectionKeysPath` (e.g. `-v stonkwatch-keys:/keys`).
+   Without it the key ring regenerates on every pull: the single user is signed out, and any
+   stored Questrade refresh token becomes undecryptable.
+4. Put a reverse proxy in front for TLS. The container serves plain HTTP on 8080 and trusts
    `X-Forwarded-*` from any source — only safe because it is never directly reachable.
-4. `docker compose up -d --build`
-5. Apply migrations (below).
+5. `docker pull <user>/stonkwatch:latest` and restart the container.
 
 ### Applying migrations
 
@@ -195,14 +207,15 @@ dotnet ef migrations bundle -o efbundle
 ./efbundle --connection "Host=...;Database=stonkwatch;..."
 ```
 
-Order matters when a migration is destructive: apply the migration, then deploy the new
-image. For additive migrations either order works.
+Order matters when a migration is destructive: apply the migration, then pull the new image.
+For additive migrations either order works, but see step 1 above — the watchlist tables are
+read on every page, so a pull that lands first still breaks the UI until they exist.
 
 ## Runbook
 
 | Symptom | Likely cause | Fix |
 |---|---|---|
-| Startup crash: `Connection string 'StonkWatch' is not configured` | `ConnectionStrings__StonkWatch` unset | Check `.env` is loaded by compose |
+| Startup crash: `Connection string 'StonkWatch' is not configured` | `ConnectionStrings__StonkWatch` unset | Check the variable is passed to the container (`-e ConnectionStrings__StonkWatch=...`) |
 | Signed out after every restart | `DataProtectionKeysPath` unset or volume not mounted | Set it and mount `stonkwatch-keys:/keys` |
 | `401` from `/api` or `/mcp` | Header name or value wrong | Header is exactly `X-Api-Key`; compare against `Auth:ApiKey` |
 | "This Google account is not authorized" after sign-in | Email doesn't match `Auth:AllowedEmail` | Check the exact address you signed in with against the config value (case-insensitive) |
@@ -237,7 +250,7 @@ Losing the key volume signs you out; losing the database loses the watchlist.
 ### Logs
 
 ```bash
-docker compose logs -f web
+docker logs -f <container>
 ```
 
 Default ASP.NET Core console logging only — there is no structured logging or metrics

@@ -58,6 +58,5 @@ StonkWatch/
 │   └── wwwroot/                 ← static assets, Bootstrap, jQuery
 ├── tests/StonkWatch.Web.Tests/  ← xUnit; Testcontainers for database tests
 ├── docker-compose.dev.yml       ← local Postgres only
-├── docker-compose.yml           ← production app container
-└── Dockerfile
+└── Dockerfile                   ← production image (the VPS supplies its own run config)
 ```
