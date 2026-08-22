@@ -345,17 +345,24 @@ public class QuestradeSymbolResolverTests
         Assert.Equal(1, auth.InvalidateCalls);
     }
 
-    // ---------- fix round 2: gap 1, a non-401 failure must not be read as "not found" ----------
+    // ---------- fix round 2 (gap 1) / round 3 table row 2: negative cache must not fire on ----
+    // ---------- any non-success status, not just 500 -------------------------------------------
 
-    [Fact]
-    public async Task A_500_is_not_negative_cached_either()
+    [Theory]
+    [InlineData(HttpStatusCode.InternalServerError)]
+    [InlineData(HttpStatusCode.Forbidden)]
+    [InlineData(HttpStatusCode.TooManyRequests)]
+    public async Task A_non_401_failure_status_is_not_negative_cached_either(HttpStatusCode status)
     {
-        // Same class of bug M-1 was, on a different status code: a transient failure read as
-        // evidence of absence. A 500 doesn't take the invalidate-and-retry path (only 401
+        // Same class of bug M-1 was, on other status codes: a transient failure read as
+        // evidence of absence. None of these take the invalidate-and-retry path (only 401
         // does), so this pins the other branch — QuestradeHttp.SendWithRetryAsync returning
         // null for any other non-success status must still map to TransientFailure, not
-        // NotFound.
-        var handler = new RecordingHandler(_ => Respond("", HttpStatusCode.InternalServerError));
+        // NotFound, for the whole family of non-auth failures Questrade can return, not just
+        // 500. Widening LookupAsync's `if (response is null) return TransientFailure;` to
+        // `return NotFound;` reddens this for all three (was confirmed for the 500 case in
+        // round 2's gap-1 fix).
+        var handler = new RecordingHandler(_ => Respond("", status));
         var time = new FakeTimeProvider(Start);
         var resolver = NewResolver(handler, time);
 
