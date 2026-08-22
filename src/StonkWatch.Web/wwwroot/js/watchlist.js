@@ -60,6 +60,201 @@
         try { localStorage.setItem(COLLAPSE_KEY, collapsed ? '1' : '0'); } catch (e) { /* private mode */ }
     });
 
+    // ---------- Add & remove ----------
+
+    var addToggle = document.getElementById('watchlist-add');
+    var searchPanel = document.getElementById('watchlist-search');
+    var searchInput = document.getElementById('watchlist-search-input');
+    var resultsList = document.getElementById('watchlist-results');
+    var searchNote = document.getElementById('watchlist-search-note');
+
+    var SEARCH_DEBOUNCE_MS = 250;
+    var searchTimer = null;
+
+    // Bumped on every keystroke that starts or abandons a search, so a slow answer for "NV"
+    // can never paint itself over the results already showing for "NVDA".
+    var searchSeq = 0;
+    var results = [];
+    var activeIndex = -1;
+
+    function note(text) {
+        searchNote.textContent = text || '';
+        searchNote.hidden = !text;
+    }
+
+    function clearResults() {
+        results = [];
+        activeIndex = -1;
+        resultsList.textContent = '';
+        searchInput.setAttribute('aria-expanded', 'false');
+    }
+
+    function openSearch(open) {
+        searchPanel.hidden = !open;
+        addToggle.setAttribute('aria-expanded', String(open));
+
+        if (open) {
+            searchInput.focus();
+        } else {
+            searchInput.value = '';
+            clearResults();
+            note('');
+        }
+    }
+
+    addToggle.addEventListener('click', function () { openSearch(searchPanel.hidden); });
+
+    function renderResults(items) {
+        results = items;
+        activeIndex = -1;
+        resultsList.textContent = '';
+
+        items.forEach(function (item, index) {
+            var li = document.createElement('li');
+            li.className = 'watchlist-result';
+            li.setAttribute('role', 'option');
+            li.setAttribute('aria-selected', 'false');
+            li.setAttribute('data-index', String(index));
+
+            var sym = document.createElement('span');
+            sym.className = 'watchlist-result-sym';
+            sym.textContent = item.symbol;
+
+            var desc = document.createElement('span');
+            desc.className = 'watchlist-result-desc';
+            desc.textContent = item.description || item.exchange;
+            desc.title = item.description ? item.description + ' · ' + item.exchange : item.exchange;
+
+            li.appendChild(sym);
+            li.appendChild(desc);
+            li.addEventListener('click', function () { addSymbol(item.symbol); });
+            resultsList.appendChild(li);
+        });
+
+        searchInput.setAttribute('aria-expanded', items.length ? 'true' : 'false');
+    }
+
+    function highlight(index) {
+        var nodes = resultsList.querySelectorAll('.watchlist-result');
+        if (!nodes.length) { return; }
+
+        // Wraps at both ends, so holding Down never dead-ends on the last row.
+        if (index < 0) { index = nodes.length - 1; }
+        if (index >= nodes.length) { index = 0; }
+        activeIndex = index;
+
+        for (var i = 0; i < nodes.length; i++) {
+            var on = i === index;
+            nodes[i].classList.toggle('is-active', on);
+            nodes[i].setAttribute('aria-selected', String(on));
+        }
+        nodes[index].scrollIntoView({ block: 'nearest' });
+    }
+
+    function runSearch(query) {
+        var seq = ++searchSeq;
+
+        fetch('/api/watchlist/search?q=' + encodeURIComponent(query),
+              { headers: { 'Accept': 'application/json' } })
+            .then(function (response) {
+                if (response.ok) { return response.json(); }
+
+                // 503 is the server saying Questrade is off or unreachable, and it carries a
+                // ProblemDetails explaining which. Typing a ticker still adds it, so this
+                // ends up on the note line rather than looking like a broken search.
+                return response.json().catch(function () { return {}; })
+                    .then(function (problem) {
+                        throw new Error(problem.detail || 'Symbol search is unavailable.');
+                    });
+            })
+            .then(function (items) {
+                if (seq !== searchSeq) { return; }
+                renderResults(items);
+                note(items.length ? '' : 'No matching US listing. Enter adds it anyway.');
+            })
+            .catch(function (error) {
+                if (seq !== searchSeq) { return; }
+                clearResults();
+                note(error.message);
+            });
+    }
+
+    searchInput.addEventListener('input', function () {
+        var query = searchInput.value.trim();
+        window.clearTimeout(searchTimer);
+
+        if (!query) {
+            searchSeq++;            // abandons whatever is still in flight
+            clearResults();
+            note('');
+            return;
+        }
+
+        searchTimer = window.setTimeout(function () { runSearch(query); }, SEARCH_DEBOUNCE_MS);
+    });
+
+    searchInput.addEventListener('keydown', function (event) {
+        if (event.key === 'ArrowDown') {
+            event.preventDefault();
+            highlight(activeIndex + 1);
+        } else if (event.key === 'ArrowUp') {
+            event.preventDefault();
+            highlight(activeIndex - 1);
+        } else if (event.key === 'Escape') {
+            event.preventDefault();
+            openSearch(false);
+            addToggle.focus();
+        } else if (event.key === 'Enter') {
+            event.preventDefault();
+            // A highlighted suggestion wins; otherwise whatever was typed. That fallback is
+            // what keeps the box working with Questrade switched off, when there are no
+            // suggestions to pick from and the server still accepts a bare ticker.
+            var chosen = activeIndex >= 0 && results[activeIndex]
+                ? results[activeIndex].symbol
+                : searchInput.value.trim();
+            if (chosen) { addSymbol(chosen); }
+        }
+    });
+
+    function addSymbol(symbol) {
+        window.clearTimeout(searchTimer);
+        searchSeq++;
+        note('Adding ' + symbol.toUpperCase() + '…');
+
+        fetch('/api/watchlist/items', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
+            body: JSON.stringify({ symbol: symbol })
+        })
+            .then(function (response) {
+                if (response.ok) { return null; }
+
+                // 400 and 409 both arrive as { error: "..." } — an empty symbol, a watchlist
+                // at its cap, a duplicate. Every one of those is worth showing verbatim
+                // instead of flattening into "add failed".
+                return response.json().catch(function () { return {}; })
+                    .then(function (body) {
+                        throw new Error(body.error || ('Add failed (HTTP ' + response.status + ').'));
+                    });
+            })
+            .then(function () {
+                openSearch(false);
+                return load();
+            })
+            .catch(function (error) { note(error.message); });
+    }
+
+    function removeItem(item) {
+        if (!window.confirm('Remove ' + item.symbol + ' from the watchlist?')) { return; }
+
+        // 404 counts as done: the row is gone either way. The reload is what reconciles this
+        // page with what the server actually holds — including on a real failure, where it
+        // puts the row back rather than leaving a lie on screen.
+        fetch('/api/watchlist/items/' + encodeURIComponent(item.id), { method: 'DELETE' })
+            .then(function () { return load(); })
+            .catch(function () { /* the stream is still live; the next resync corrects it */ });
+    }
+
     // ---------- Rendering ----------
 
     function setStatus(state, text) {
@@ -103,6 +298,19 @@
             cell.textContent = '—';
             el.appendChild(cell);
         });
+
+        // Absolutely positioned (see watchlist.css) so it stays out of the row's grid and
+        // cannot add a sixth column the header does not have.
+        var remove = document.createElement('button');
+        remove.type = 'button';
+        remove.className = 'watchlist-remove';
+        remove.title = 'Remove ' + item.symbol;
+        remove.textContent = '\u00d7';
+        remove.addEventListener('click', function (event) {
+            event.stopPropagation();
+            removeItem(item);
+        });
+        el.appendChild(remove);
 
         updateRow(el, item, false);
         return el;
@@ -164,7 +372,7 @@
         if (!view.rows.length) {
             var empty = document.createElement('p');
             empty.className = 'watchlist-empty';
-            empty.textContent = 'No symbols yet.';
+            empty.textContent = 'No symbols yet \u2014 press + to add one.';
             body.appendChild(empty);
             return;
         }

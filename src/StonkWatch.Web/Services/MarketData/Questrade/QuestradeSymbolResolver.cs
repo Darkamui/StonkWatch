@@ -21,6 +21,16 @@ public interface IQuestradeSymbolResolver
     /// </summary>
     Task<IReadOnlyDictionary<string, int>> ResolveAsync(
         IReadOnlyCollection<string> tickers, CancellationToken ct = default);
+
+    /// <summary>
+    /// Records a symbolId that a lookup somewhere else already paid for, and drops any
+    /// negative-cache entry for the ticker. The second half is the point: a search that finds
+    /// a symbol is proof it exists, which is exactly the evidence a stale negative-cache entry
+    /// lacks. Without this, one Questrade response that returned no matches blacklists a
+    /// perfectly real ticker for the next half hour, and re-adding it from a search that just
+    /// found it still shows nothing.
+    /// </summary>
+    void Prime(string ticker, int symbolId);
 }
 
 /// <summary>
@@ -34,13 +44,6 @@ public class QuestradeSymbolResolver(
     ILogger<QuestradeSymbolResolver> logger) : IQuestradeSymbolResolver
 {
     private const int NegativeCacheMinutes = 30;
-
-    /// <summary>US equities and ETFs only — a same-ticker TSX listing would otherwise supply
-    /// Canadian prices without anything downstream noticing.</summary>
-    private static readonly HashSet<string> UsExchanges = new(StringComparer.OrdinalIgnoreCase)
-    {
-        "NASDAQ", "NYSE", "AMEX", "ARCA", "BATS", "NYSEMKT"
-    };
 
     private readonly ConcurrentDictionary<string, int> _resolved = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, DateTimeOffset> _negativeUntil = new(StringComparer.Ordinal);
@@ -149,6 +152,18 @@ public class QuestradeSymbolResolver(
         return result;
     }
 
+    public void Prime(string ticker, int symbolId)
+    {
+        var normalized = Normalize(ticker);
+        if (normalized.Length == 0)
+        {
+            return;
+        }
+
+        _resolved[normalized] = symbolId;
+        _negativeUntil.TryRemove(normalized, out _);
+    }
+
     private async Task<LookupResult> LookupAsync(string ticker, CancellationToken ct)
     {
         const string path = "v1/symbols/search";
@@ -204,7 +219,7 @@ public class QuestradeSymbolResolver(
             }
 
             if (!TryGetString(entry, "listingExchange", out var exchange)
-                || !UsExchanges.Contains(exchange))
+                || !QuestradeExchanges.Us.Contains(exchange))
             {
                 continue;
             }

@@ -260,6 +260,26 @@ The script does a `GET /api/watchlist` for the full view, then opens an `EventSo
   `EventSource` closes for good rather than retrying, and the status line says "live prices
   off" with a neutral dot instead of reconnecting forever behind a red one.
 
+The `+` in the header opens a search box over the list. Typing debounces onto
+`GET /api/watchlist/search?q=`, which asks Questrade for prefix matches through
+`IQuestradeSymbolSearch`; choosing one — or pressing Enter on a bare ticker — `POST`s to
+`/api/watchlist/items`, and the row's `x` `DELETE`s it. Three things about the search are
+deliberate:
+
+- **It offers only what the poller can price.** Search and `QuestradeSymbolResolver` share one
+  venue list, `QuestradeExchanges.Us`. Were they to drift, search would offer a TSX listing the
+  resolver then refuses, and the row would sit at `—` forever with nothing explaining why.
+- **An exact-ticker match primes the resolver.** A search that found the symbol is proof it
+  exists, which is exactly the evidence a stale negative-cache entry lacks — without priming, a
+  transient empty response blacklists a real ticker for half an hour and re-adding it still
+  shows nothing. Prefix neighbours are never primed: the positive cache lives as long as the
+  process, and priming every match would grow it from keystrokes.
+- **An upstream failure is a `503`, never an empty list.** The poller answers a bad tick with
+  "nothing this time"; here that would render a Questrade outage as "no such symbol". The
+  `503` body is fixed text — the exception's own message could carry a token or an `api_server`
+  URL. With Questrade switched off the route says so rather than 404ing, and the box still
+  adds a typed ticker.
+
 Row clicks do nothing yet — rows are focusable and semantic so that wiring them later is a
 behaviour change, not a rebuild.
 

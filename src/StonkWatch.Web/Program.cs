@@ -132,6 +132,10 @@ if (questradeEnabled)
     // from session.ApiServer at call time and changes between sessions.
     builder.Services.AddHttpClient<IQuestradeQuoteClient, QuestradeQuoteClient>();
 
+    // Ordinary typed client: unlike the resolver this holds no per-process cache, so it has
+    // no reason to be a singleton. It depends on the singleton resolver only to prime it.
+    builder.Services.AddHttpClient<IQuestradeSymbolSearch, QuestradeSymbolSearch>();
+
     builder.Services.AddScoped<LiveWatchlistPollJob>();
 
     var liveWatchlistEnabled = builder.Configuration

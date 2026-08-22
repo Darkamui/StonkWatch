@@ -9,6 +9,24 @@
             <span class="visually-hidden">Toggle watchlist</span>
         </button>
         <h2 class="watchlist-title">Watchlist</h2>
+        <button id="watchlist-add" class="watchlist-add" type="button"
+                aria-expanded="false" aria-controls="watchlist-search"
+                title="Add a symbol">
+            <span aria-hidden="true">+</span>
+            <span class="visually-hidden">Add a symbol</span>
+        </button>
+    </div>
+
+    @* Hidden until the + is pressed. Not a <form>: submitting is handled on the input's
+       Enter key so that choosing a search result and typing a bare ticker take the same
+       path, and so a stray Enter can never reload the page out from under the stream. *@
+    <div id="watchlist-search" class="watchlist-search" hidden>
+        <input id="watchlist-search-input" class="watchlist-search-input" type="text"
+               placeholder="Symbol or company…" autocomplete="off" spellcheck="false"
+               role="combobox" aria-expanded="false" aria-autocomplete="list"
+               aria-controls="watchlist-results" aria-label="Add a symbol" />
+        <ul id="watchlist-results" class="watchlist-results" role="listbox"></ul>
+        <p id="watchlist-search-note" class="watchlist-search-note" hidden></p>
     </div>
 
     <div class="watchlist-cols" aria-hidden="true">

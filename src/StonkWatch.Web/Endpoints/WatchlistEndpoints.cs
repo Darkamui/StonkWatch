@@ -5,6 +5,7 @@ using Microsoft.Extensions.Options;
 using StonkWatch.Web.Contracts;
 using StonkWatch.Web.Data;
 using StonkWatch.Web.Services.MarketData;
+using StonkWatch.Web.Services.MarketData.Questrade;
 using StonkWatch.Web.Services.Watchlist;
 
 namespace StonkWatch.Web.Endpoints;
@@ -38,6 +39,53 @@ public static class WatchlistEndpoints
             var keepalive = TimeSpan.FromSeconds(options.Value.KeepaliveSeconds);
             return TypedResults.ServerSentEvents(
                 StreamAsync(scopeFactory, cache, time, keepalive, ct));
+        });
+
+        // Backs the sidebar's add box. Questrade-only, and mapped unconditionally so that a
+        // server with Questrade switched off answers the sidebar's call with a reason rather
+        // than a 404 the JavaScript would have to guess at — the same choice /stream makes.
+        group.MapGet("/search", async (
+            string? q,
+            IOptions<QuestradeOptions> questrade,
+            IServiceProvider services,
+            CancellationToken ct) =>
+        {
+            if (!questrade.Value.Enabled)
+            {
+                return Results.Problem(
+                    "Symbol search needs a connected Questrade account. Type a ticker and "
+                    + "press Enter to add it without one.",
+                    statusCode: StatusCodes.Status503ServiceUnavailable);
+            }
+
+            // Empty is not an error — it is what the box sends as the user clears it — but it
+            // must not become a wildcard prefix that asks Questrade for the whole tape.
+            if (string.IsNullOrWhiteSpace(q))
+            {
+                return Results.Ok(Array.Empty<SymbolSearchResultDto>());
+            }
+
+            // Resolved here rather than injected: the Questrade services are registered only
+            // when the feature is on, so an injected parameter would make this route fail to
+            // bind on exactly the server the 503 above exists to explain.
+            var search = services.GetRequiredService<IQuestradeSymbolSearch>();
+
+            try
+            {
+                return Results.Ok(await search.SearchAsync(q, SearchLimit, ct));
+            }
+            catch (Exception ex) when (
+                ex is HttpRequestException or QuestradeReauthorizationRequiredException
+                   or InvalidOperationException or TaskCanceledException)
+            {
+                // Everything the search can fail with upstream: a rejected token, a Questrade
+                // 5xx, a dropped socket, a timeout. None of them are this request's fault and
+                // none should surface as an empty result list, which would read as "no such
+                // symbol". The message is fixed text — a token must never reach a response.
+                return Results.Problem(
+                    "Questrade symbol search is unavailable right now.",
+                    statusCode: StatusCodes.Status503ServiceUnavailable);
+            }
         });
 
         // Ok rather than Created: there is no GET-by-id route for a single item, so
@@ -127,6 +175,12 @@ public static class WatchlistEndpoints
             }
         });
     }
+
+    /// <summary>
+    /// How many search matches the sidebar gets. Small on purpose: the dropdown sits in a
+    /// 340px rail, and a prefix like "A" matches hundreds of listings nobody scrolls.
+    /// </summary>
+    private const int SearchLimit = 10;
 
     private static async Task<WatchlistViewDto> BuildViewAsync(
         WatchlistService service, LiveQuoteCache cache, TimeProvider time, CancellationToken ct)

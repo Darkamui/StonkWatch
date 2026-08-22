@@ -40,6 +40,14 @@ public record WatchlistRowDto(
     decimal? ExtendedPrice,
     DateTimeOffset? LastAt);
 
+/// <summary>
+/// One candidate from the sidebar's symbol search. <c>SymbolId</c> is Questrade's own public
+/// identifier for the listing, carried so the caller can tell two same-ticker listings apart;
+/// it is not a secret and not a StonkWatch key.
+/// </summary>
+public record SymbolSearchResultDto(
+    string Symbol, string Description, string Exchange, int SymbolId);
+
 public record WatchlistViewDto(
     IReadOnlyList<WatchlistGroupDto> Groups,
     IReadOnlyList<WatchlistRowDto> Rows,

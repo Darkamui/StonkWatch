@@ -52,6 +52,11 @@ public class LiveWatchlistPollJobTests(PostgresFixture fixture) : IAsyncLifetime
 
             return Task.FromResult<IReadOnlyDictionary<string, int>>(result);
         }
+
+        // These fakes exercise the poll path, which never primes. Nothing to record.
+        public void Prime(string ticker, int symbolId)
+        {
+        }
     }
 
     private sealed class ThrowingResolver : IQuestradeSymbolResolver
@@ -60,6 +65,11 @@ public class LiveWatchlistPollJobTests(PostgresFixture fixture) : IAsyncLifetime
             IReadOnlyCollection<string> tickers, CancellationToken ct = default) =>
             throw new QuestradeReauthorizationRequiredException(
                 "Questrade rejected the stored refresh token. Re-authorize StonkWatch.");
+
+        // These fakes exercise the poll path, which never primes. Nothing to record.
+        public void Prime(string ticker, int symbolId)
+        {
+        }
     }
 
     private sealed class FakeQuoteClient : IQuestradeQuoteClient

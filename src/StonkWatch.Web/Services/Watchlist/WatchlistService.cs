@@ -50,8 +50,7 @@ public class WatchlistService(
         if (count >= _options.MaxSymbols)
         {
             throw new ValidationException(
-                $"The watchlist is limited to {_options.MaxSymbols} symbols "
-                + "by the market data provider's streaming cap. Remove one first.");
+                $"The watchlist is limited to {_options.MaxSymbols} symbols. Remove one first.");
         }
 
         if (request.GroupId is { } groupId

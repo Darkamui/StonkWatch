@@ -64,6 +64,11 @@ public class LiveWatchlistPollWorkerTests(PostgresFixture fixture) : IAsyncLifet
             IReadOnlyCollection<string> tickers, CancellationToken ct = default) =>
             Task.FromResult<IReadOnlyDictionary<string, int>>(
                 tickers.Where(map.ContainsKey).ToDictionary(t => t, t => map[t]));
+
+        // These fakes exercise the poll path, which never primes. Nothing to record.
+        public void Prime(string ticker, int symbolId)
+        {
+        }
     }
 
     private sealed class CountingQuoteClient : IQuestradeQuoteClient
@@ -127,6 +132,11 @@ public class LiveWatchlistPollWorkerTests(PostgresFixture fixture) : IAsyncLifet
 
             return Task.FromResult<IReadOnlyDictionary<string, int>>(
                 tickers.Where(map.ContainsKey).ToDictionary(t => t, t => map[t]));
+        }
+
+        // These fakes exercise the poll path, which never primes. Nothing to record.
+        public void Prime(string ticker, int symbolId)
+        {
         }
     }
 
