@@ -25,6 +25,9 @@ Single user, single instance, no multi-tenancy.
 6. **PATCH is three-way**: omitted → unchanged, `""` → clear, value → set. Use `MergeString`.
 7. **Secrets never leave configuration.** No API keys in code, logs, `appsettings.json`, or
    anything rendered to a page. Compare secrets with `CryptographicOperations.FixedTimeEquals`.
+   One documented exception: the rotating Questrade refresh token, which configuration cannot
+   hold because it changes on every use — it is persisted encrypted at rest instead. See
+   [docs/conventions.md](docs/conventions.md#security).
 
 ## Commands
 
@@ -63,7 +66,7 @@ Things that will bite if you change this code:
 
 ## Current state
 
-- **172 tests** in `tests/StonkWatch.Web.Tests`. Keep them green; add to them.
+- **329 tests** in `tests/StonkWatch.Web.Tests`. Keep them green; add to them.
 - **Tier 2 (AI research) and the live watchlist are not built.** See
   [docs/tech-assessment.md](docs/tech-assessment.md) for the agreed approach before starting.
 - Migrations are applied deliberately, never at startup.
