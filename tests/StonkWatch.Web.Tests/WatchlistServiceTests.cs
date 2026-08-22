@@ -203,7 +203,22 @@ public class WatchlistServiceTests(PostgresFixture fixture) : IAsyncLifetime
 
         await service.ListSymbolsAsync();
 
-        Assert.Contains(sqlLog, line => line.Contains("ORDER BY", StringComparison.Ordinal));
+        // Asserting only "an ORDER BY exists" is too weak: mutating the production sort key to
+        // .OrderByDescending(i => i.Id) still produces an ORDER BY clause, so that assertion
+        // alone left the mutation green across the whole 312-test suite. Pin the actual column
+        // sequence instead — sort_order before symbol — without coupling to the table alias or
+        // quoting EF happens to emit, since those churn independently of the ordering this test
+        // cares about.
+        var orderByLine = sqlLog
+            .SelectMany(entry => entry.Split('\n'))
+            .FirstOrDefault(line => line.Contains("ORDER BY", StringComparison.Ordinal));
+        Assert.NotNull(orderByLine);
+
+        var sortOrderIndex = orderByLine!.IndexOf("sort_order", StringComparison.Ordinal);
+        var symbolIndex = orderByLine.IndexOf("symbol", StringComparison.Ordinal);
+        Assert.True(
+            sortOrderIndex >= 0 && symbolIndex > sortOrderIndex,
+            $"Expected ORDER BY to sequence sort_order before symbol; got: {orderByLine}");
     }
 
     [Fact]
