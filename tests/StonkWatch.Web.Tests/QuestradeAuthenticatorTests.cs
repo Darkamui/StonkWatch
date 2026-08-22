@@ -607,4 +607,31 @@ public class QuestradeAuthenticatorTests : IDisposable
             Assert.DoesNotContain(access, text, StringComparison.Ordinal);
         }
     }
+
+    [Fact]
+    public async Task A_pre_cancelled_call_throws_cleanly_without_wedging_the_refresh_gate()
+    {
+        // Pins _refreshGate.WaitAsync(ct) staying outside the try block in GetSessionAsync. A
+        // token cancelled before the call starts must never reach the semaphore at all: if
+        // WaitAsync were moved inside the try, the finally's unconditional Release() would fire
+        // without a matching acquire, and on a SemaphoreSlim(1,1) that throws
+        // SemaphoreFullException instead of the OperationCanceledException this test expects —
+        // and worse, a caller catching OperationCanceledException around that regression would
+        // never see the SemaphoreFullException that actually mattered.
+        var handler = TokenEndpointHandler.Always(TokenJson());
+        var authenticator = NewAuthenticator(handler, new RecordingTokenStore());
+
+        using var cts = new CancellationTokenSource();
+        await cts.CancelAsync();
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(
+            () => authenticator.GetSessionAsync(cts.Token));
+
+        // No request should have reached "Questrade" — cancellation happened before any work.
+        Assert.Empty(handler.Bodies);
+
+        // And the gate is not wedged: an ordinary call right after must still succeed.
+        var session = await authenticator.GetSessionAsync();
+        Assert.Equal("access-1", session.AccessToken);
+    }
 }

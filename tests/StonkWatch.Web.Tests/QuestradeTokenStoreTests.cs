@@ -225,4 +225,22 @@ public class QuestradeTokenStoreTests : IAsyncLifetime, IDisposable
             Assert.Equal(_time.GetUtcNow(), row.UpdatedAt);
         }
     }
+
+    [Fact]
+    public void SaveAsync_deliberately_has_no_CancellationToken_parameter()
+    {
+        // Pins the deliberate omission documented on IQuestradeTokenStore.SaveAsync: once a
+        // fresh refresh token has been handed to us (from the authorize endpoint or a
+        // successful Questrade rotation), there is nothing left to lose by letting the save run
+        // to completion, and a CancellationToken parameter would invite a future caller to
+        // abandon it midway and drop the only way back into the account. A reflection check
+        // rather than a doc comment because the doc comment cannot fail a build if someone
+        // "fixes" this by adding the parameter back.
+        var method = typeof(IQuestradeTokenStore).GetMethod(nameof(IQuestradeTokenStore.SaveAsync));
+
+        Assert.NotNull(method);
+        var parameters = method.GetParameters();
+        Assert.Single(parameters);
+        Assert.Equal(typeof(string), parameters[0].ParameterType);
+    }
 }
