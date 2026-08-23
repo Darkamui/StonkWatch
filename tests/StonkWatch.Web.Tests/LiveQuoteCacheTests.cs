@@ -241,14 +241,69 @@ public class LiveQuoteCacheTests
         cache.ApplySnapshot(new Quote("ASTS", 60.00m, Now.AddSeconds(-5)), Session);  // stale
         cache.ApplySnapshot(new Quote("ASTS", 68.00m, Now.AddSeconds(1)), Session);   // wins
 
-        // Every snapshot publishes a frame, including one that lost the merge outright.
-        // What matters is that the frame carries the *merged* quote, so a subscriber never
-        // sees the stale 60.00 on the wire — only the price that survived.
-        Assert.True(await enumerator.MoveNextAsync());
-        Assert.Equal(67.61m, enumerator.Current.Last);
-
+        // The stale snapshot loses the merge outright, changing nothing a subscriber would
+        // render, so it publishes nothing at all — and the one frame that does arrive carries
+        // the price that survived. Either way the wire never shows 60.00.
         Assert.True(await enumerator.MoveNextAsync());
         Assert.Equal(68.00m, enumerator.Current.Last);
+    }
+
+    [Fact]
+    public async Task A_snapshot_that_changes_nothing_visible_publishes_nothing()
+    {
+        var cache = NewCache();
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+        cache.ApplySnapshot(new Quote("ASTS", 67.61m, Now, Volume: 1_000), Session);
+
+        var enumerator = cache.SubscribeAsync(cts.Token).GetAsyncEnumerator(cts.Token);
+
+        // Same price, same volume, later timestamp — exactly what every poll looks like once
+        // trading stops. Publishing these is how the sidebar ended up repainting every row
+        // every three seconds all night.
+        cache.ApplySnapshot(new Quote("ASTS", 67.61m, Now.AddSeconds(3), Volume: 1_000), Session);
+        cache.ApplySnapshot(new Quote("ASTS", 67.61m, Now.AddSeconds(6), Volume: 1_000), Session);
+
+        // The stored quote still advances; only the fan-out is suppressed.
+        Assert.Equal(Now.AddSeconds(6), cache.Get("ASTS")!.LastAt);
+
+        var next = enumerator.MoveNextAsync();
+        Assert.False(next.IsCompleted, "A repeat of the stored values must not reach a subscriber.");
+
+        // And the next real move still gets through, so this is a filter, not a mute.
+        cache.ApplySnapshot(new Quote("ASTS", 67.75m, Now.AddSeconds(9), Volume: 1_000), Session);
+        Assert.True(await next);
+        Assert.Equal(67.75m, enumerator.Current.Last);
+    }
+
+    [Theory]
+    [InlineData("volume")]
+    [InlineData("previousClose")]
+    [InlineData("extended")]
+    public async Task A_change_to_any_rendered_field_publishes_even_when_the_price_holds(string field)
+    {
+        var cache = NewCache();
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+        cache.ApplySnapshot(
+            new Quote("ASTS", 67.61m, Now, Volume: 1_000, PreviousClose: 66.00m), Session);
+
+        var enumerator = cache.SubscribeAsync(cts.Token).GetAsyncEnumerator(cts.Token);
+
+        // The price is the obvious field, and the easy mistake is to compare only that one.
+        // Volume climbs all day, the previous close arrives a tick after the price on a cold
+        // cache, and the extended print is the whole reason the Ext column exists.
+        var at = Now.AddSeconds(3);
+        var quote = field switch
+        {
+            "volume" => new Quote("ASTS", 67.61m, at, Volume: 2_000, PreviousClose: 66.00m),
+            "previousClose" => new Quote("ASTS", 67.61m, at, Volume: 1_000, PreviousClose: 65.00m),
+            _ => new Quote(
+                "ASTS", 67.61m, at, Volume: 1_000, PreviousClose: 66.00m,
+                ExtendedPrice: 68.10m, ExtendedAt: at),
+        };
+
+        cache.ApplySnapshot(quote, Session);
+
+        Assert.True(await enumerator.MoveNextAsync());
     }
 
     [Fact]

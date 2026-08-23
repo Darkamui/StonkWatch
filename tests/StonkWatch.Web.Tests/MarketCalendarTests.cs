@@ -161,4 +161,64 @@ public class MarketCalendarTests
 
         Assert.Equal(new DateOnly(2026, 8, 1), MarketCalendar.SessionDate(instant));
     }
+
+    // ---------- Phases ----------
+
+    [Theory]
+    [InlineData(3, 59, MarketPhase.Closed)]      // the overnight gap
+    [InlineData(4, 0, MarketPhase.PreMarket)]    // the ECNs start matching
+    [InlineData(9, 29, MarketPhase.PreMarket)]
+    [InlineData(9, 30, MarketPhase.Regular)]
+    [InlineData(15, 59, MarketPhase.Regular)]
+    [InlineData(16, 0, MarketPhase.AfterHours)]  // the bell belongs to the session starting
+    [InlineData(19, 59, MarketPhase.AfterHours)]
+    [InlineData(20, 0, MarketPhase.Closed)]
+    public void Each_boundary_belongs_to_the_session_that_is_starting(
+        int hour, int minute, MarketPhase expected)
+    {
+        // Friday 31 July 2026. Every bound is inclusive at the bottom and exclusive at the
+        // top, so no instant of the day falls in two phases or in none.
+        Assert.Equal(expected, MarketCalendar.Phase(Edt(2026, 7, 31, hour, minute)));
+    }
+
+    [Fact]
+    public void A_weekend_has_no_extended_session()
+    {
+        // Saturday 1 August 2026, 18:00 — inside the after-hours window on a weekday. The
+        // ECNs do not run a session on a day the exchange never opened, and a worker that
+        // believed otherwise would poll all weekend.
+        Assert.Equal(MarketPhase.Closed, MarketCalendar.Phase(Edt(2026, 8, 1, 18)));
+    }
+
+    [Fact]
+    public void A_holiday_has_no_extended_session()
+    {
+        // Independence Day observed, Friday 3 July 2026, 06:00 — pre-market hours.
+        Assert.Equal(MarketPhase.Closed, MarketCalendar.Phase(Edt(2026, 7, 3, 6)));
+    }
+
+    [Fact]
+    public void Extended_hours_are_not_open_hours()
+    {
+        // IsOpen decides which of Questrade's two price fields is authoritative and whether
+        // an alert level counts as crossed. Neither should change because someone printed a
+        // hundred shares at 04:15, so IsOpen must stay narrower than "not closed".
+        var preMarket = Edt(2026, 7, 31, 5);
+        Assert.Equal(MarketPhase.PreMarket, MarketCalendar.Phase(preMarket));
+        Assert.False(MarketCalendar.IsOpen(preMarket));
+
+        var afterHours = Edt(2026, 7, 31, 18);
+        Assert.Equal(MarketPhase.AfterHours, MarketCalendar.Phase(afterHours));
+        Assert.False(MarketCalendar.IsOpen(afterHours));
+    }
+
+    [Fact]
+    public void Winter_phases_follow_eastern_standard_time()
+    {
+        // Tuesday 12 January 2027, 09:00 EST. The bounds are wall-clock Eastern, so a UTC
+        // offset baked in anywhere would shift every boundary by an hour for four months
+        // of the year.
+        Assert.Equal(MarketPhase.PreMarket, MarketCalendar.Phase(Est(2027, 1, 12, 9)));
+        Assert.Equal(MarketPhase.Regular, MarketCalendar.Phase(Est(2027, 1, 12, 10)));
+    }
 }

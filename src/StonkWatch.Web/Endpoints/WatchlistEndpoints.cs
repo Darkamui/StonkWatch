@@ -6,6 +6,7 @@ using StonkWatch.Web.Contracts;
 using StonkWatch.Web.Data;
 using StonkWatch.Web.Services.MarketData;
 using StonkWatch.Web.Services.MarketData.Questrade;
+using StonkWatch.Web.Services.Monitoring;
 using StonkWatch.Web.Services.Watchlist;
 
 namespace StonkWatch.Web.Endpoints;
@@ -198,7 +199,14 @@ public static class WatchlistEndpoints
     /// </summary>
     private static readonly TimeSpan RefreshThrottle = TimeSpan.FromSeconds(2);
 
-    private static async IAsyncEnumerable<SseItem<WatchlistRowDto?>> StreamAsync(
+    /// <remarks>
+    /// The payload type is <c>object?</c> because this stream carries three shapes: a
+    /// <see cref="WatchlistRowDto"/> on <c>quote</c>, a <see cref="MarketPhaseDto"/> on
+    /// <c>phase</c>, and null on <c>ping</c>. System.Text.Json serializes a declared
+    /// <c>object</c> by its runtime type, so each event still renders as exactly the JSON its
+    /// own record defines.
+    /// </remarks>
+    private static async IAsyncEnumerable<SseItem<object?>> StreamAsync(
         IServiceScopeFactory scopeFactory, LiveQuoteCache cache, TimeProvider time,
         TimeSpan keepaliveInterval,
         [EnumeratorCancellation] CancellationToken ct)
@@ -208,8 +216,13 @@ public static class WatchlistEndpoints
 
         foreach (var item in items)
         {
-            yield return new SseItem<WatchlistRowDto?>(ToRow(item, cache.Get(item.Symbol)), "quote");
+            yield return new SseItem<object?>(ToRow(item, cache.Get(item.Symbol)), "quote");
         }
+
+        // Null, so the first pass of the loop below always announces the phase. Every
+        // reconnect therefore re-announces it, which is what a browser resuming from sleep
+        // needs — it may have missed the transition that happened while it was gone.
+        MarketPhase? lastPhase = null;
 
         // Never set from the opening burst above: the first tick for a symbol this
         // connection doesn't recognize must refresh immediately (a symbol added right
@@ -221,6 +234,16 @@ public static class WatchlistEndpoints
 
         while (true)
         {
+            // Checked here rather than on a timer of its own: the loop already wakes on every
+            // quote and, failing that, every keepalive, so the label is never more than one
+            // keepalive interval behind the bell.
+            var phase = MarketCalendar.Phase(time.GetUtcNow());
+            if (phase != lastPhase)
+            {
+                lastPhase = phase;
+                yield return new SseItem<object?>(new MarketPhaseDto(phase.ToString()), "phase");
+            }
+
             // Raced against the subscription read rather than layered on top of it: an
             // await-foreach has no point at which to also wait on a timer, so the
             // enumerator is driven by hand here.
@@ -234,7 +257,7 @@ public static class WatchlistEndpoints
                 // instead, which ends this iterator exactly as the old await-foreach did —
                 // the `await using` above still unsubscribes on the way out.
                 await keepaliveDelay;
-                yield return new SseItem<WatchlistRowDto?>(null, "ping");
+                yield return new SseItem<object?>(null, "ping");
                 continue;
             }
 
@@ -263,7 +286,7 @@ public static class WatchlistEndpoints
             // drop it rather than inventing one.
             if (item is not null)
             {
-                yield return new SseItem<WatchlistRowDto?>(ToRow(item, quote), "quote");
+                yield return new SseItem<object?>(ToRow(item, quote), "quote");
             }
 
             moveNextTask = subscription.MoveNextAsync().AsTask();

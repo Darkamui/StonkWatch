@@ -257,6 +257,16 @@
 
     // ---------- Rendering ----------
 
+    // What the status line says for each phase the server reports. Only "Regular" gets the
+    // green dot: pre- and post-market do move prices, but calling them "live" would claim a
+    // regular session, and a green dot at 02:00 reads as a fault to anyone checking.
+    var PHASE_STATUS = {
+        Regular: ['live', 'live'],
+        PreMarket: ['quiet', 'pre-market'],
+        AfterHours: ['quiet', 'after hours'],
+        Closed: ['quiet', 'market closed']
+    };
+
     function setStatus(state, text) {
         status.setAttribute('data-state', state);
         statusText.textContent = text;
@@ -357,8 +367,13 @@
             ext.className = 'num';
         }
 
-        if (flash && previous !== null && !isBlank(item.last)) {
-            var direction = Number(item.last) >= Number(previous) ? 'flash-up' : 'flash-down';
+        // An unchanged price does not flash. The old `>=` sent every equal value down the
+        // up branch, so any symbol that had not traded since the last poll pulsed green on
+        // every tick — all night with the market shut, and during the session too for
+        // anything thinly traded. Green has to mean the price rose.
+        if (flash && previous !== null && !isBlank(item.last)
+            && Number(item.last) !== Number(previous)) {
+            var direction = Number(item.last) > Number(previous) ? 'flash-up' : 'flash-down';
             el.classList.remove('flash-up', 'flash-down');
             void el.offsetWidth;   // restart the animation
             el.classList.add(direction);
@@ -458,6 +473,18 @@
 
             var el = body.querySelector('[data-row-id="' + row.id + '"]');
             if (el) { updateRow(el, row, true); } else { resync(); }
+        });
+
+        // Phase changes arrive on their own event, first on connect and then at each bell.
+        // Without it a closed market is indistinguishable from a broken poller: the rows
+        // simply stop moving under a status line still saying "live".
+        source.addEventListener('phase', function (event) {
+            var payload;
+            try { payload = JSON.parse(event.data); } catch (e) { return; }
+            // An unknown phase name is left alone rather than blanked: a server newer than
+            // this script should not be able to empty the status line.
+            var entry = payload && PHASE_STATUS[payload.phase];
+            if (entry) { setStatus(entry[0], entry[1]); }
         });
 
         // The keepalive, ignored on purpose. It carries `null`, not a row, so letting it

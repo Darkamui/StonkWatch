@@ -24,6 +24,21 @@ public class LiveWatchlistOptions
     public int PollSeconds { get; set; } = 3;
 
     /// <summary>
+    /// How often to poll while the market is fully closed — no regular session and no extended
+    /// hours. Pre- and post-market both use <see cref="PollSeconds"/>: prices genuinely move
+    /// then, and watching them is the point.
+    /// </summary>
+    /// <remarks>
+    /// Slow rather than zero on purpose. <see cref="MarketData.LiveQuoteCache"/> lives in
+    /// process memory only, so a container restart on a Saturday would leave every row at an
+    /// em dash until Monday's pre-market if closed ticks stopped entirely. One call every five
+    /// minutes — and only while somebody actually has the sidebar open — refills a cold cache
+    /// without pretending anything is moving.
+    /// </remarks>
+    [Range(5, 3600)]
+    public int ClosedPollSeconds { get; set; } = 300;
+
+    /// <summary>
     /// How long the SSE stream can go without a real data event before it sends a
     /// keepalive. <c>Program.cs</c> documents a reverse proxy in front, and proxies commonly
     /// drop idle upstream connections around 60s; outside market hours this stream can

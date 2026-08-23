@@ -5,6 +5,7 @@ using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.Extensions.DependencyInjection;
 using StonkWatch.Web.Contracts;
 using StonkWatch.Web.Services.MarketData;
+using StonkWatch.Web.Services.Monitoring;
 
 namespace StonkWatch.Web.Tests;
 
@@ -195,7 +196,7 @@ public class WatchlistEndpointsTests(PostgresFixture fixture) : IAsyncLifetime
         using var reader = new StreamReader(stream);
 
         // Opening burst: one row for the symbol just added, no quote yet.
-        var burstRow = DeserializeRow(await ReadNextEventDataAsync(reader, cts.Token));
+        var burstRow = DeserializeRow(await ReadNextEventDataAsync(reader, "quote", cts.Token));
         Assert.Equal("ASTS", burstRow.Symbol);
         Assert.Null(burstRow.Last);
 
@@ -212,7 +213,7 @@ public class WatchlistEndpointsTests(PostgresFixture fixture) : IAsyncLifetime
             new Quote("ASTS", 123.45m, DateTimeOffset.UtcNow),
             DateOnly.FromDateTime(DateTime.UtcNow));
 
-        var tickRow = DeserializeRow(await ReadNextEventDataAsync(reader, cts.Token));
+        var tickRow = DeserializeRow(await ReadNextEventDataAsync(reader, "quote", cts.Token));
         Assert.Equal("ASTS", tickRow.Symbol);
         Assert.Equal(123.45m, tickRow.Last);
     }
@@ -234,7 +235,7 @@ public class WatchlistEndpointsTests(PostgresFixture fixture) : IAsyncLifetime
         var reader = new StreamReader(stream);
 
         // Drain the burst so the subscription has actually registered before measuring it.
-        await ReadNextEventDataAsync(reader, cts.Token);
+        await ReadNextEventDataAsync(reader, "quote", cts.Token);
         await WaitForAsync(() => cache.SubscriberCount == 1, cts.Token);
         Assert.Equal(1, cache.SubscriberCount);
 
@@ -267,7 +268,7 @@ public class WatchlistEndpointsTests(PostgresFixture fixture) : IAsyncLifetime
         using var reader = new StreamReader(stream);
 
         // Drain the opening burst (ASTS only — NVDA doesn't exist on the watchlist yet).
-        await ReadNextEventDataAsync(reader, cts.Token);
+        await ReadNextEventDataAsync(reader, "quote", cts.Token);
 
         var cache = factory.Services.GetRequiredService<LiveQuoteCache>();
         await WaitForAsync(() => cache.SubscriberCount == 1, cts.Token);
@@ -280,7 +281,7 @@ public class WatchlistEndpointsTests(PostgresFixture fixture) : IAsyncLifetime
             new Quote("NVDA", 900.12m, DateTimeOffset.UtcNow),
             DateOnly.FromDateTime(DateTime.UtcNow));
 
-        var tickRow = DeserializeRow(await ReadNextEventDataAsync(reader, cts.Token));
+        var tickRow = DeserializeRow(await ReadNextEventDataAsync(reader, "quote", cts.Token));
         Assert.Equal("NVDA", tickRow.Symbol);
         Assert.Equal(900.12m, tickRow.Last);
     }
@@ -320,9 +321,17 @@ public class WatchlistEndpointsTests(PostgresFixture fixture) : IAsyncLifetime
         var burst = await ReadNextEventAsync(reader, cts.Token);
         Assert.Equal("quote", burst.EventType);
 
-        // No trade is ever applied here — the only thing that can produce a second event
-        // is the keepalive itself, which is exactly what this test needs to isolate it
-        // from real data events.
+        // Every stream announces the market phase once, immediately after the burst, so the
+        // sidebar can label itself before any quote moves.
+        var phase = await ReadNextEventAsync(reader, cts.Token);
+        Assert.Equal("phase", phase.EventType);
+        Assert.Contains(
+            JsonSerializer.Deserialize<MarketPhaseDto>(phase.Data, JsonOptions)!.Phase,
+            Enum.GetNames<MarketPhase>());
+
+        // No trade is ever applied here, and the phase cannot change twice in ten seconds —
+        // the only thing that can produce a third event is the keepalive itself, which is
+        // exactly what this test needs to isolate it from real data events.
         var idle = await ReadNextEventAsync(reader, cts.Token);
         Assert.Equal("ping", idle.EventType);
     }
@@ -334,6 +343,25 @@ public class WatchlistEndpointsTests(PostgresFixture fixture) : IAsyncLifetime
     /// </summary>
     private static async Task<string> ReadNextEventDataAsync(StreamReader reader, CancellationToken ct) =>
         (await ReadNextEventAsync(reader, ct)).Data;
+
+    /// <summary>
+    /// Reads until the next event of <paramref name="eventType"/>, discarding the others. The
+    /// stream multiplexes three shapes — "quote", "phase" and "ping" — so a test that wants a
+    /// row has to say so; taking whatever arrives next deserializes a phase frame into a
+    /// <see cref="WatchlistRowDto"/> full of nulls and asserts against that.
+    /// </summary>
+    private static async Task<string> ReadNextEventDataAsync(
+        StreamReader reader, string eventType, CancellationToken ct)
+    {
+        while (true)
+        {
+            var next = await ReadNextEventAsync(reader, ct);
+            if (next.EventType == eventType)
+            {
+                return next.Data;
+            }
+        }
+    }
 
     /// <summary>
     /// Reads one full SSE event (its "event:" field, if present, and its "data:" field),

@@ -66,10 +66,12 @@ Things that will bite if you change this code:
 
 ## Current state
 
-- **356 tests** in `tests/StonkWatch.Web.Tests`. Keep them green; add to them.
+- **375 tests** in `tests/StonkWatch.Web.Tests`. Keep them green; add to them.
 - **The live watchlist is built** — Questrade auth, polling, the API, the SSE stream, and the
   right-docked sidebar (`_WatchlistSidebar.cshtml` + `wwwroot/js/watchlist.js`), rendered from
-  `_Layout.cshtml` for signed-in users only. Symbols are added from the sidebar's `+` box, which
+  `_Layout.cshtml` for signed-in users only. The stream also carries a `phase` event, and
+  polling thins to `ClosedPollSeconds` only while the market is fully closed — extended hours
+  keep the full cadence. Symbols are added from the sidebar's `+` box, which
   searches Questrade via `GET /api/watchlist/search`. Row clicks are deliberately inert for now.
   **Tier 2 (AI research) is not built** — see
   [docs/tech-assessment.md](docs/tech-assessment.md) for the agreed approach before starting.

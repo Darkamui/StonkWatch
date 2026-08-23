@@ -83,20 +83,49 @@ public sealed class LiveQuoteCache(TimeProvider timeProvider)
     /// current baseline from yesterday's; a stale one would silently skew every change
     /// percentage for a whole day.
     /// </param>
+    /// <remarks>
+    /// The stored quote is always replaced; subscribers hear about it only when something they
+    /// would render actually moved. Every snapshot advances <see cref="LiveQuote.LastAt"/> to
+    /// the moment of the poll, so a merge is never equal to what it replaced and publishing
+    /// unconditionally means one frame per symbol per tick forever — identical numbers every
+    /// three seconds, all night. Subscribers are not left guessing whether the connection is
+    /// alive: the SSE stream's own keepalive covers that, and covers it whether the silence
+    /// comes from a closed market or from a symbol that simply has not traded.
+    /// </remarks>
     public void ApplySnapshot(Quote quote, DateOnly session)
     {
         var symbol = Normalize(quote.Symbol);
 
         lock (_gate)
         {
-            var updated = _quotes.TryGetValue(symbol, out var existing)
-                ? Merge(existing, quote, session)
-                : Create(symbol, quote, session);
+            var existing = _quotes.TryGetValue(symbol, out var found) ? found : null;
+            var updated = existing is null
+                ? Create(symbol, quote, session)
+                : Merge(existing, quote, session);
 
             _quotes[symbol] = updated;
-            Publish(updated);
+
+            // A symbol seen for the first time always publishes, even if every field is
+            // null: that frame is what tells an open sidebar the row exists.
+            if (existing is null || RendersDifferently(existing, updated))
+            {
+                Publish(updated);
+            }
         }
     }
+
+    /// <summary>
+    /// Whether anything a subscriber displays differs between the two. Timestamps are
+    /// deliberately excluded — they move on every poll by construction, so counting them
+    /// would make this always true and the check pointless. <c>ChangePercent</c> needs no
+    /// line of its own: it derives from <c>Last</c> and <c>PreviousClose</c>, both compared
+    /// here.
+    /// </summary>
+    private static bool RendersDifferently(LiveQuote before, LiveQuote after) =>
+        before.Last != after.Last
+        || before.PreviousClose != after.PreviousClose
+        || before.Volume != after.Volume
+        || before.ExtendedPrice != after.ExtendedPrice;
 
     private static LiveQuote Create(string symbol, Quote quote, DateOnly session)
     {

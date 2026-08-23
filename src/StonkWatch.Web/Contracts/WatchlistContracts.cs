@@ -48,6 +48,13 @@ public record WatchlistRowDto(
 public record SymbolSearchResultDto(
     string Symbol, string Description, string Exchange, int SymbolId);
 
+/// <summary>
+/// Which part of the trading day the server believes it is in, pushed on the SSE stream so the
+/// sidebar's status line can say why prices are not moving. A string rather than the enum so
+/// adding a phase later cannot break a browser holding an old script.
+/// </summary>
+public record MarketPhaseDto(string Phase);
+
 public record WatchlistViewDto(
     IReadOnlyList<WatchlistGroupDto> Groups,
     IReadOnlyList<WatchlistRowDto> Rows,

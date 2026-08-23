@@ -247,7 +247,7 @@ authenticated, so an anonymous visitor would get a panel stuck on "Loading…" a
 The login page uses `_LoginLayout.cshtml` and never sees it.
 
 The script does a `GET /api/watchlist` for the full view, then opens an `EventSource` on
-`/api/watchlist/stream` and patches rows in place. Four things about it are deliberate:
+`/api/watchlist/stream` and patches rows in place. Five things about it are deliberate:
 
 - **The browser never contacts Questrade.** It only calls this app's own routes, on the session
   cookie. No provider name, key, or token appears anywhere in the markup, CSS, or script.
@@ -259,6 +259,9 @@ The script does a `GET /api/watchlist` for the full view, then opens an `EventSo
 - **A 503 is a state, not a fault.** With the feature switched off the stream never opens; the
   `EventSource` closes for good rather than retrying, and the status line says "live prices
   off" with a neutral dot instead of reconnecting forever behind a red one.
+- **A row flashes only on a price that moved.** Green means up and red means down, so an
+  unchanged price must flash neither. The cache enforces the same rule upstream: a snapshot
+  that changes nothing a row renders publishes no frame at all (see below).
 
 The `+` in the header opens a search box over the list. Typing debounces onto
 `GET /api/watchlist/search?q=`, which asks Questrade for prefix matches through
@@ -282,6 +285,37 @@ deliberate:
 
 Row clicks do nothing yet — rows are focusable and semantic so that wiring them later is a
 behaviour change, not a rebuild.
+
+### Market phases and poll cadence
+
+`MarketCalendar.Phase` classifies an instant as `PreMarket` (04:00 ET), `Regular` (09:30),
+`AfterHours` (16:00) or `Closed` (from 20:00, plus weekends and holidays). `IsOpen` is
+defined as `Phase(...) == Regular` and must stay that narrow: monitoring uses it to judge
+level crossings, and `LiveWatchlistPollJob` uses it to choose between Questrade's
+`lastTradePrice` and `lastTradePriceTrHrs`. A 04:15 print is not a regular-session trade.
+
+Three consequences worth knowing:
+
+- **Extended hours poll at the full cadence.** Pre- and post-market are exactly when a swing
+  trader wants to watch, and the `Ext` column has nothing to show otherwise. Only `Closed`
+  thins out, to `LiveWatchlist:ClosedPollSeconds` (default 300).
+- **A closed market still polls, slowly, rather than stopping.** `LiveQuoteCache` is process
+  memory only. A container restart on a Saturday with no closed ticks would leave every row at
+  `—` until Monday's pre-market, with no path back. One call every five minutes — and only
+  while somebody has the sidebar open — refills a cold cache without pretending anything moves.
+  The closed-window stamp is cleared on every open tick, so 04:00 polls immediately instead of
+  waiting out a window opened at 03:57.
+- **The stream announces the phase.** `/api/watchlist/stream` carries three event shapes on one
+  connection — `quote` (a `WatchlistRowDto`), `phase` (a `MarketPhaseDto`, sent once on connect
+  and again on every transition) and `ping` (null) — which is why its items are typed
+  `SseItem<object?>`: the serializer then writes each frame by its runtime type. The sidebar's
+  status line reads "live", "pre-market", "after hours" or "market closed" from it.
+
+A closed market therefore produces no visual churn even before the cadence change, because
+`LiveQuoteCache.ApplySnapshot` publishes only when a rendered field actually differs — the
+merged record's `LastAt` advances on every poll, so publishing unconditionally repainted every
+row on every tick. A symbol's first snapshot always publishes, even if every field is null:
+that frame is what tells an open sidebar the row exists.
 
 ## Deployment topology
 

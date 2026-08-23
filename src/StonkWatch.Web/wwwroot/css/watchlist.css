@@ -183,8 +183,9 @@
 
 .watchlist-status[data-state="live"] .watchlist-dot { background: var(--bull); }
 .watchlist-status[data-state="error"] .watchlist-dot { background: var(--bear); }
-/* "off" keeps the neutral grey dot: live prices being disabled is a configuration
-   state, not a fault, and a red dot would send the operator hunting for a break. */
+/* "off" and "quiet" keep the neutral grey dot: live prices being disabled, and the market
+   being shut or in extended hours, are states rather than faults — a red dot would send the
+   operator hunting for a break, and a green one would claim a regular session. */
 
 .watchlist-empty { padding: 1rem 0.6rem; color: var(--ink-faint); font-size: 0.8rem; }
 
