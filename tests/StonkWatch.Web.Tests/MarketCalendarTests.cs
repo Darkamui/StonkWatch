@@ -221,4 +221,68 @@ public class MarketCalendarTests
         Assert.Equal(MarketPhase.PreMarket, MarketCalendar.Phase(Est(2027, 1, 12, 9)));
         Assert.Equal(MarketPhase.Regular, MarketCalendar.Phase(Est(2027, 1, 12, 10)));
     }
+
+    // ---------- Display session ----------
+
+    [Theory]
+    [InlineData(3, 0, 7, 30)]    // overnight, before pre-market even opens
+    [InlineData(5, 0, 7, 30)]    // pre-market
+    [InlineData(9, 29, 7, 30)]   // one minute before the bell
+    [InlineData(9, 30, 7, 31)]   // the bell itself rolls it forward
+    [InlineData(12, 0, 7, 31)]
+    [InlineData(18, 0, 7, 31)]   // after-hours still belongs to the session that just ran
+    [InlineData(23, 0, 7, 31)]   // and so does the rest of the calendar day
+    public void The_displayed_session_rolls_over_at_the_opening_bell(
+        int hour, int minute, int expectedMonth, int expectedDay)
+    {
+        // Friday 31 July 2026; the previous trading day is Thursday the 30th.
+        Assert.Equal(
+            new DateOnly(2026, expectedMonth, expectedDay),
+            MarketCalendar.DisplaySession(Edt(2026, 7, 31, hour, minute)));
+    }
+
+    [Fact]
+    public void A_weekend_shows_fridays_session()
+    {
+        // Saturday 1 and Sunday 2 August 2026. Nothing has traded since Friday, so Friday is
+        // what the row shows — including on Sunday evening, which is a fresh calendar day.
+        Assert.Equal(new DateOnly(2026, 7, 31), MarketCalendar.DisplaySession(Edt(2026, 8, 1, 12)));
+        Assert.Equal(new DateOnly(2026, 7, 31), MarketCalendar.DisplaySession(Edt(2026, 8, 2, 22)));
+    }
+
+    [Fact]
+    public void A_holiday_weekend_skips_back_over_every_closed_day()
+    {
+        // Tuesday 7 July 2026, 06:00 — pre-market. Monday the 6th traded, so it is the session
+        // on screen. But at 06:00 on Monday itself the last session was Thursday the 2nd:
+        // Friday the 3rd is Independence Day observed, then the weekend.
+        Assert.Equal(new DateOnly(2026, 7, 6), MarketCalendar.DisplaySession(Edt(2026, 7, 7, 6)));
+        Assert.Equal(new DateOnly(2026, 7, 2), MarketCalendar.DisplaySession(Edt(2026, 7, 6, 6)));
+    }
+
+    [Fact]
+    public void The_displayed_session_differs_from_the_calendar_date_before_the_bell()
+    {
+        // The whole point of having both. SessionDate answers "which day is it" and rolls at
+        // midnight; DisplaySession answers "which session is on screen" and rolls at 09:30.
+        // Keying a change-percentage baseline on the first flattens every row to 0.00% for
+        // the whole of pre-market.
+        var preMarket = Edt(2026, 7, 31, 6);
+        Assert.Equal(new DateOnly(2026, 7, 31), MarketCalendar.SessionDate(preMarket));
+        Assert.Equal(new DateOnly(2026, 7, 30), MarketCalendar.DisplaySession(preMarket));
+    }
+
+    [Theory]
+    [InlineData(2026, 7, 31, -4)]  // summer: EDT
+    [InlineData(2027, 1, 12, -5)]  // winter: EST
+    public void SessionStart_is_midnight_eastern_in_that_dates_own_offset(
+        int year, int month, int day, int offsetHours)
+    {
+        // Questrade's candle endpoint takes the offset literally, so a UTC-normalised bound
+        // would ask for the wrong days for half the year.
+        var start = MarketCalendar.SessionStart(new DateOnly(year, month, day));
+
+        Assert.Equal(TimeSpan.FromHours(offsetHours), start.Offset);
+        Assert.Equal(new DateTime(year, month, day, 0, 0, 0), start.DateTime);
+    }
 }

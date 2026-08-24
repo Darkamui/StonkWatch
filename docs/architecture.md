@@ -254,15 +254,12 @@ The script does a `GET /api/watchlist` for the full view, then opens an `EventSo
 - **A missing value renders `—`, never `0`.** The opening burst can arrive with every price
   null — the poller does nothing while nobody has the sidebar open — and a null `changePercent`
   is tinted neither green nor red. `0.00%` claims "flat today", which is a different fact.
-- **`Ext` is a percentage, not a price.** Outside regular hours `Last` already *is* the
-  extended print, so a second price column repeated it verbatim. `Ext` now carries
-  `extendedChangePercent` — the move off `LiveQuote.RegularClose`, Questrade's
-  `lastTradePriceTrHrs`, which is yesterday's close before the bell and today's after it. That
-  differs from `Chg%` (measured off `prevDayClosePrice`) exactly when it should: after hours,
-  `Chg%` is the whole two-session move and `Ext` is only what happened since the close. In
-  pre-market the two coincide, because no regular session has happened yet — the same move
-  measured twice, not a bug. During the session `Ext` is blank: there is no extended print, and
-  `0.00%` would assert after-hours trading that did not happen.
+- **`Last`, `Chg%` and `Ext` split the day the way a broker screen does.** `Last` and `Chg%`
+  always describe one regular session — the live one, or the last one that ran — and `Ext`
+  carries the extended-hours drift on top. Outside the session the first two freeze: `Last`
+  holds `lastTradePriceTrHrs`, the closing print, and `Chg%` holds that session's own move.
+  A 04:15 trade never enters either; it moves `Ext` alone. See *The three price columns*
+  below for where each number comes from.
 - **The `ping` keepalive is ignored on purpose.** It carries `null`, not a row; a listener that
   parsed it as a quote would throw on the first property access.
 - **A 503 is a state, not a fault.** With the feature switched off the stream never opens; the
@@ -295,18 +292,58 @@ deliberate:
 Row clicks do nothing yet — rows are focusable and semantic so that wiring them later is a
 behaviour change, not a rebuild.
 
+### The three price columns
+
+Each column answers a different question, and the split only becomes visible outside the
+regular session — which is most of the day.
+
+| Column | Value | Source |
+| --- | --- | --- |
+| `Last` | the displayed session's price | Questrade `lastTradePriceTrHrs` |
+| `Chg%` | that session's own move | `Last` against `LiveQuote.PreviousClose` |
+| `Ext` | the drift since that session closed | `lastTradePrice` against `Last` |
+
+The *displayed session* is `MarketCalendar.DisplaySession`: today once the opening bell has
+rung, otherwise the last day that traded. It is deliberately not `SessionDate`, which is only
+the Eastern calendar date. At 06:00 on a Tuesday the row is still showing Monday, so Monday is
+the session every column belongs to, and the rollover happens at 09:30 rather than midnight.
+
+Four things follow, each of which has already been a bug:
+
+- **`Last` is never the extended print.** `lastTradePriceTrHrs` is the last *trading hours*
+  trade, so it is the live price during the session and that session's close afterwards.
+  Reading `lastTradePrice` outside the session put the pre-market price under `Last` and made
+  `Ext` — measured against `Last` — a duplicate of `Chg%`.
+- **The `Chg%` baseline cannot come from `prevDayClosePrice`.** Questrade exposes that field on
+  both `v1/markets/quotes` and `v1/symbols`, for free, in the batched call the job already
+  makes — and it is the wrong number. It rolls forward as soon as a new trading day starts, so
+  from pre-market onwards it reports the very close the row is displaying as `Last`, and the
+  change works out to exactly `0.00%` until the bell. The baseline has to reach back one
+  further session.
+- **Daily candles are what reaches back that far.** `GET v1/markets/candles/:id` with
+  `interval=OneDay` is the only Questrade source that does. `LiveWatchlistPollJob` asks for the
+  fortnight before the displayed session and takes the last candle *starting* before it —
+  filtered on the candle's own `start`, because the endpoint's `endTime` bound is not
+  documented as exclusive and a candle that merely touches the boundary is the displayed
+  session itself. That would measure a session against its own close.
+- **It costs one request per symbol, so it is cached for the whole session.**
+  `LiveQuoteCache.SymbolsNeedingPreviousClose` returns only the symbols whose baseline is
+  missing or stamped with an earlier session, which in steady state means one pass at 09:30.
+  A symbol with no candle history keeps a null baseline and renders `—` rather than a
+  fabricated `0.00%`.
+
 ### Market phases and poll cadence
 
 `MarketCalendar.Phase` classifies an instant as `PreMarket` (04:00 ET), `Regular` (09:30),
 `AfterHours` (16:00) or `Closed` (from 20:00, plus weekends and holidays). `IsOpen` is
 defined as `Phase(...) == Regular` and must stay that narrow: monitoring uses it to judge
-level crossings, and `LiveWatchlistPollJob` uses it to choose between Questrade's
-`lastTradePrice` and `lastTradePriceTrHrs`. A 04:15 print is not a regular-session trade.
+level crossings, and `LiveWatchlistPollJob` uses it to decide whether an extended
+print exists at all. A 04:15 print is not a regular-session trade.
 
 Three consequences worth knowing:
 
 - **Extended hours poll at the full cadence.** Pre- and post-market are exactly when a swing
-  trader wants to watch, and the `Ext` column has nothing to show otherwise. Only `Closed`
+  trader wants to watch, and `Ext` is the only column still moving then. Only `Closed`
   thins out, to `LiveWatchlist:ClosedPollSeconds` (default 300).
 - **A closed market still polls, slowly, rather than stopping.** `LiveQuoteCache` is process
   memory only. A container restart on a Saturday with no closed ticks would leave every row at

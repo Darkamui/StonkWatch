@@ -15,14 +15,20 @@ public record LiveQuote(
     long? Volume = null,
     DateTimeOffset? VolumeAt = null,
     decimal? ExtendedPrice = null,
-    DateTimeOffset? ExtendedAt = null,
-    decimal? RegularClose = null)
+    DateTimeOffset? ExtendedAt = null)
 {
     /// <summary>
+    /// The regular session's own move, in percent — the "Chg%" column. Both sides belong to
+    /// the session on screen: <see cref="Last"/> is that session's price (live during it, its
+    /// closing print afterwards) and <see cref="PreviousClose"/> is the close of the session
+    /// before it. Extended-hours trading never enters this number; it is
+    /// <see cref="ExtendedChangePercent"/>'s job.
+    /// </summary>
+    /// <remarks>
     /// Null — never zero — when there is no baseline to measure against. A fabricated
     /// "0.00%" reads as "flat today", which is a materially different claim from
     /// "we don't know yet".
-    /// </summary>
+    /// </remarks>
     public decimal? ChangePercent =>
         Last is { } last && PreviousClose is { } previousClose && previousClose != 0
             ? (last - previousClose) / previousClose * 100m
@@ -30,18 +36,18 @@ public record LiveQuote(
 
     /// <summary>
     /// How far the extended-hours print has moved off the regular session, as a percentage —
-    /// what a broker's "Ext" column shows. Measured against <see cref="RegularClose"/>, not
-    /// <see cref="PreviousClose"/>: after the bell those are different days, and the
-    /// interesting number is the move since today's close, not since yesterday's.
+    /// what a broker's "Ext" column shows. The baseline is <see cref="Last"/>, not
+    /// <see cref="PreviousClose"/>, and outside the regular session that is exactly the right
+    /// one: <see cref="Last"/> is then the displayed session's closing print, so this reads as
+    /// the move since that close — after the bell, today's; before it, yesterday's.
     /// </summary>
     /// <remarks>
-    /// Pre-market is the degenerate case, and deliberately so. No regular session has happened
-    /// yet, so <see cref="RegularClose"/> is the previous day's close and this reads the same
-    /// as <see cref="ChangePercent"/>. That is the honest answer rather than a coincidence to
-    /// paper over: the pre-market move and the move since the last close are the same move.
+    /// Set only outside regular hours. During the session the extended price is the live price,
+    /// so a percentage here would either be a duplicate of <see cref="ChangePercent"/> or a
+    /// flat zero; the producer leaves <see cref="ExtendedPrice"/> null instead.
     /// </remarks>
     public decimal? ExtendedChangePercent =>
-        ExtendedPrice is { } extended && RegularClose is { } regularClose && regularClose != 0
-            ? (extended - regularClose) / regularClose * 100m
+        ExtendedPrice is { } extended && Last is { } last && last != 0
+            ? (extended - last) / last * 100m
             : null;
 }

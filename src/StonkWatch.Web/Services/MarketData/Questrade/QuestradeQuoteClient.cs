@@ -8,15 +8,30 @@ public record QuestradeQuote(
     int SymbolId, string Symbol, decimal? LastTradePrice,
     decimal? LastTradePriceTrHrs, long? Volume);
 
+/// <summary>
+/// One candle from Questrade's <c>v1/markets/candles</c> response. <see cref="Start"/> is the
+/// beginning of the period the candle covers — for a daily candle, midnight Eastern on the day
+/// it belongs to — which is what lets a caller tell one session's close from the next.
+/// </summary>
+public record QuestradeCandle(DateTimeOffset Start, decimal Close);
+
 public interface IQuestradeQuoteClient
 {
     /// <summary>One request for the whole list — never one call per symbol.</summary>
     Task<IReadOnlyDictionary<int, QuestradeQuote>> GetQuotesAsync(
         IReadOnlyCollection<int> symbolIds, CancellationToken ct = default);
 
-    /// <summary>Reads <c>prevDayClosePrice</c> from the symbol record.</summary>
-    Task<IReadOnlyDictionary<int, decimal>> GetPreviousClosesAsync(
-        IReadOnlyCollection<int> symbolIds, CancellationToken ct = default);
+    /// <summary>
+    /// Daily candles for one symbol between <paramref name="from"/> and <paramref name="to"/>,
+    /// oldest first. Candles without a usable close are dropped rather than defaulted.
+    /// </summary>
+    /// <remarks>
+    /// One request per symbol: <c>v1/markets/candles</c> takes a single id, unlike quotes and
+    /// symbols, which are batched. Callers are expected to fetch these once per session and
+    /// cache the result, not once per poll tick.
+    /// </remarks>
+    Task<IReadOnlyList<QuestradeCandle>> GetDailyCandlesAsync(
+        int symbolId, DateTimeOffset from, DateTimeOffset to, CancellationToken ct = default);
 }
 
 /// <summary>
@@ -75,35 +90,38 @@ public class QuestradeQuoteClient(
         return result;
     }
 
-    public async Task<IReadOnlyDictionary<int, decimal>> GetPreviousClosesAsync(
-        IReadOnlyCollection<int> symbolIds, CancellationToken ct = default)
+    public async Task<IReadOnlyList<QuestradeCandle>> GetDailyCandlesAsync(
+        int symbolId, DateTimeOffset from, DateTimeOffset to, CancellationToken ct = default)
     {
-        var result = new Dictionary<int, decimal>();
-        if (symbolIds.Count == 0)
-        {
-            return result;
-        }
+        var path = $"v1/markets/candles/{symbolId}";
+        var query = $"?startTime={Uri.EscapeDataString(Iso(from))}"
+                    + $"&endTime={Uri.EscapeDataString(Iso(to))}&interval=OneDay";
 
-        const string path = "v1/symbols";
-        using var response = await SendWithRetryAsync(path, symbolIds, ct);
+        using var response = await QuestradeHttp.SendWithRetryAsync(
+            http, authenticator, logger, path, session => $"{session.ApiServer}{path}{query}", ct);
         if (response is null)
         {
-            return result;
+            return [];
         }
 
         await using var stream = await response.Content.ReadAsStreamAsync(ct);
         using var doc = await JsonDocument.ParseAsync(stream, cancellationToken: ct);
 
-        if (!doc.RootElement.TryGetProperty("symbols", out var symbols) || symbols.ValueKind != JsonValueKind.Array)
+        if (!doc.RootElement.TryGetProperty("candles", out var candles)
+            || candles.ValueKind != JsonValueKind.Array)
         {
-            return result;
+            return [];
         }
 
-        foreach (var entry in symbols.EnumerateArray())
+        var result = new List<QuestradeCandle>();
+        foreach (var candle in candles.EnumerateArray())
         {
-            if (TryGetInt(entry, "symbolId", out var id) && ReadDecimal(entry, "prevDayClosePrice") is { } close)
+            // Both halves are required. A candle with a close but no start cannot be placed
+            // in a session, and one placed in a session with no close prices nothing.
+            if (ReadDateTimeOffset(candle, "start") is { } start
+                && ReadDecimal(candle, "close") is { } close)
             {
-                result[id] = close;
+                result.Add(new QuestradeCandle(start, close));
             }
         }
 
@@ -111,7 +129,7 @@ public class QuestradeQuoteClient(
     }
 
     /// <summary>
-    /// Sends the batched GET via the shared <see cref="QuestradeHttp"/> policy: retry exactly
+    /// Sends the batched id-list GET via the shared <see cref="QuestradeHttp"/> policy: retry exactly
     /// once on a 401 after invalidating the cached session; a second 401 throws — the retry is
     /// bounded, not a loop. Any other non-success status is logged (path and status code only;
     /// the token lives in the header and is never logged) and answered with a null response,
@@ -163,6 +181,22 @@ public class QuestradeQuoteClient(
             _ => null
         };
     }
+
+    private static DateTimeOffset? ReadDateTimeOffset(JsonElement element, string property) =>
+        element.TryGetProperty(property, out var value)
+        && value.ValueKind == JsonValueKind.String
+        && DateTimeOffset.TryParse(
+            value.GetString(), CultureInfo.InvariantCulture, DateTimeStyles.None, out var parsed)
+            ? parsed
+            : null;
+
+    /// <summary>
+    /// Questrade's candle endpoint wants a full ISO 8601 timestamp with an explicit offset —
+    /// a bare date is rejected — and the offset must survive round-tripping, so the value is
+    /// formatted in its own zone rather than normalised to UTC.
+    /// </summary>
+    private static string Iso(DateTimeOffset instant) =>
+        instant.ToString("yyyy-MM-ddTHH:mm:sszzz", CultureInfo.InvariantCulture);
 
     private static long? ReadLong(JsonElement element, string property)
     {

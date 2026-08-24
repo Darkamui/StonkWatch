@@ -88,12 +88,7 @@ public static class MarketCalendar
     {
         var eastern = TimeZoneInfo.ConvertTime(instant, Eastern);
 
-        if (eastern.DayOfWeek is DayOfWeek.Saturday or DayOfWeek.Sunday)
-        {
-            return MarketPhase.Closed;
-        }
-
-        if (Holidays.Contains(DateOnly.FromDateTime(eastern.Date)))
+        if (!IsTradingDay(DateOnly.FromDateTime(eastern.Date)))
         {
             return MarketPhase.Closed;
         }
@@ -124,6 +119,42 @@ public static class MarketCalendar
     public static DateOnly SessionDate(DateTimeOffset instant) =>
         DateOnly.FromDateTime(TimeZoneInfo.ConvertTime(instant, Eastern).Date);
 
+    /// <summary>
+    /// The trading date whose regular session the watchlist is currently showing: today once
+    /// the opening bell has rung, otherwise the most recent day that had a session. A row read
+    /// at 06:00 therefore still reports yesterday's close and yesterday's change, the way a
+    /// broker's pre-market screen does, and only rolls over at 09:30.
+    /// </summary>
+    /// <remarks>
+    /// Deliberately distinct from <see cref="SessionDate"/>, which is only the Eastern calendar
+    /// date. That one answers "which day is it"; this one answers "which session is on screen",
+    /// and the two disagree for the nine and a half hours between midnight and the open, plus
+    /// every weekend and holiday. Keying a change-percentage baseline on the calendar date rolls
+    /// it forward while the row is still showing the previous session, which reads as a flat
+    /// 0.00% until the bell.
+    /// </remarks>
+    public static DateOnly DisplaySession(DateTimeOffset instant)
+    {
+        var eastern = TimeZoneInfo.ConvertTime(instant, Eastern);
+        var date = DateOnly.FromDateTime(eastern.Date);
+
+        return IsTradingDay(date) && TimeOnly.FromDateTime(eastern.DateTime) >= Open
+            ? date
+            : PreviousTradingDay(date);
+    }
+
+    /// <summary>
+    /// Midnight Eastern on <paramref name="date"/>, as an absolute instant. Used to bound a
+    /// daily-candle request, which needs a real offset rather than a bare date.
+    /// </summary>
+    public static DateTimeOffset SessionStart(DateOnly date)
+    {
+        // Never ambiguous or invalid: US daylight-saving transitions happen at 02:00 local,
+        // so midnight always exists exactly once.
+        var midnight = date.ToDateTime(TimeOnly.MinValue);
+        return new DateTimeOffset(midnight, Eastern.GetUtcOffset(midnight));
+    }
+
     /// <summary>Human-readable reason a tick did nothing, for the job_runs record.</summary>
     public static string DescribeClosed(DateTimeOffset instant)
     {
@@ -140,6 +171,29 @@ public static class MarketCalendar
         }
 
         return "Market closed (outside 09:30-16:00 ET)";
+    }
+
+    private static bool IsTradingDay(DateOnly date) =>
+        date.DayOfWeek is not (DayOfWeek.Saturday or DayOfWeek.Sunday) && !Holidays.Contains(date);
+
+    /// <summary>
+    /// The last trading day strictly before <paramref name="date"/>. The walk is bounded
+    /// rather than open: a run of non-trading days longer than a fortnight would mean
+    /// <see cref="Holidays"/> is wrong, and returning a slightly wrong date is a far better
+    /// way to find that out than a loop that never ends on the poll thread.
+    /// </summary>
+    private static DateOnly PreviousTradingDay(DateOnly date)
+    {
+        for (var back = 1; back <= 14; back++)
+        {
+            var candidate = date.AddDays(-back);
+            if (IsTradingDay(candidate))
+            {
+                return candidate;
+            }
+        }
+
+        return date.AddDays(-1);
     }
 
     private static TimeZoneInfo ResolveEastern()

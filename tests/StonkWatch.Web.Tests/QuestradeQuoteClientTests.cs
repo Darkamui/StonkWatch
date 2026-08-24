@@ -8,7 +8,8 @@ using StonkWatch.Web.Services.MarketData.Questrade;
 namespace StonkWatch.Web.Tests;
 
 /// <summary>
-/// Batched Questrade quote and previous-close REST calls. These tests pin the failure paths
+/// Batched Questrade quote calls and the per-symbol daily-candle call. These tests pin the
+/// failure paths
 /// most likely to silently break the sidebar: a 401 from an expired access token has to
 /// invalidate and retry exactly once (not loop forever), any other failure must return an
 /// empty result rather than kill the poll loop, and the bearer token must never reach a log
@@ -108,16 +109,65 @@ public class QuestradeQuoteClientTests
     }
 
     [Fact]
-    public async Task GetPreviousClosesAsync_reads_prevDayClosePrice()
+    public async Task GetDailyCandlesAsync_reads_each_candles_start_and_close()
     {
         var handler = new SequencedHandler((_, _) => Respond(
-            """{"symbols":[{"symbolId":1,"prevDayClosePrice":148.50}]}"""));
+            """
+            {"candles":[
+              {"start":"2026-08-14T00:00:00.000000-04:00","end":"2026-08-15T00:00:00.000000-04:00","close":146.75},
+              {"start":"2026-08-17T00:00:00.000000-04:00","end":"2026-08-18T00:00:00.000000-04:00","close":148.50}
+            ]}
+            """));
         var client = NewClient(handler, new RecordingAuthenticator("token"));
 
-        var result = await client.GetPreviousClosesAsync([1]);
+        var result = await client.GetDailyCandlesAsync(
+            1,
+            new DateTimeOffset(2026, 8, 4, 0, 0, 0, TimeSpan.FromHours(-4)),
+            new DateTimeOffset(2026, 8, 18, 0, 0, 0, TimeSpan.FromHours(-4)));
 
-        Assert.Equal(148.50m, result[1]);
-        Assert.Contains("v1/symbols", handler.Requests[0].RequestUri!.ToString(), StringComparison.Ordinal);
+        Assert.Equal([146.75m, 148.50m], result.Select(c => c.Close));
+        Assert.Equal(
+            new DateTimeOffset(2026, 8, 17, 0, 0, 0, TimeSpan.FromHours(-4)), result[1].Start);
+
+        // Per-symbol path, daily interval, and both bounds carrying a real offset — Questrade
+        // rejects a bare date, and a request normalised to UTC would ask for the wrong days.
+        var uri = handler.Requests[0].RequestUri!.ToString();
+        Assert.Contains("v1/markets/candles/1", uri, StringComparison.Ordinal);
+        Assert.Contains("interval=OneDay", uri, StringComparison.Ordinal);
+        Assert.Contains(
+            Uri.EscapeDataString("2026-08-18T00:00:00-04:00"), uri, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task GetDailyCandlesAsync_skips_a_candle_missing_a_start_or_a_close()
+    {
+        var handler = new SequencedHandler((_, _) => Respond(
+            """
+            {"candles":[
+              {"start":"2026-08-14T00:00:00.000000-04:00"},
+              {"close":148.50},
+              {"start":"2026-08-17T00:00:00.000000-04:00","close":148.50}
+            ]}
+            """));
+        var client = NewClient(handler, new RecordingAuthenticator("token"));
+
+        var result = await client.GetDailyCandlesAsync(1, DateTimeOffset.UnixEpoch, DateTimeOffset.UnixEpoch);
+
+        // Half a candle cannot be placed in a session or priced, so it is dropped rather than
+        // defaulted — a zero close here would become somebody's -100% change.
+        var candle = Assert.Single(result);
+        Assert.Equal(148.50m, candle.Close);
+    }
+
+    [Fact]
+    public async Task GetDailyCandlesAsync_returns_empty_when_the_request_fails()
+    {
+        var handler = new SequencedHandler((_, _) => Respond("", HttpStatusCode.InternalServerError));
+        var client = NewClient(handler, new RecordingAuthenticator("token"));
+
+        var result = await client.GetDailyCandlesAsync(1, DateTimeOffset.UnixEpoch, DateTimeOffset.UnixEpoch);
+
+        Assert.Empty(result);
     }
 
     [Fact]

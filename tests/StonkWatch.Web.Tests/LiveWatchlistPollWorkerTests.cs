@@ -94,9 +94,9 @@ public class LiveWatchlistPollWorkerTests(PostgresFixture fixture) : IAsyncLifet
             return Task.FromResult<IReadOnlyDictionary<int, QuestradeQuote>>(result);
         }
 
-        public Task<IReadOnlyDictionary<int, decimal>> GetPreviousClosesAsync(
-            IReadOnlyCollection<int> symbolIds, CancellationToken ct = default) =>
-            Task.FromResult<IReadOnlyDictionary<int, decimal>>(new Dictionary<int, decimal>());
+        public Task<IReadOnlyList<QuestradeCandle>> GetDailyCandlesAsync(
+            int symbolId, DateTimeOffset from, DateTimeOffset to, CancellationToken ct = default) =>
+            Task.FromResult<IReadOnlyList<QuestradeCandle>>([]);
     }
 
     /// <summary>

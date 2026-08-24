@@ -20,6 +20,9 @@ public class LiveWatchlistPollJob(
     IOptions<LiveWatchlistOptions> options,
     ILogger<LiveWatchlistPollJob> logger)
 {
+    /// <summary>How far back to ask for daily candles — see FetchPreviousClosesAsync.</summary>
+    private const int CandleLookbackDays = 14;
+
     public async Task RunAsync(CancellationToken ct = default)
     {
         try
@@ -82,18 +85,16 @@ public class LiveWatchlistPollJob(
         }
 
         var now = timeProvider.GetUtcNow();
-        var session = MarketCalendar.SessionDate(now);
+
+        // The session on screen, not today's calendar date. Before the opening bell every row
+        // still shows the previous session's close and change, so that is the session whose
+        // baseline the cache needs; rolling at midnight would swap the baseline nine hours
+        // early and flatten every change percentage to 0.00% for the whole of pre-market.
+        var session = MarketCalendar.DisplaySession(now);
         var regularHours = MarketCalendar.IsOpen(now);
 
-        var needingPreviousClose = cache.SymbolsNeedingPreviousClose(resolved.Keys, session);
-        var previousCloseIds = needingPreviousClose
-            .Where(resolved.ContainsKey)
-            .Select(symbol => resolved[symbol])
-            .ToList();
-
-        var previousCloses = previousCloseIds.Count > 0
-            ? await client.GetPreviousClosesAsync(previousCloseIds, ct)
-            : new Dictionary<int, decimal>();
+        var previousCloses = await FetchPreviousClosesAsync(
+            cache.SymbolsNeedingPreviousClose(resolved.Keys, session), resolved, session, ct);
 
         var idToSymbol = resolved
             .GroupBy(kv => kv.Value)
@@ -108,44 +109,118 @@ public class LiveWatchlistPollJob(
                 continue;
             }
 
-            var price = regularHours ? quote.LastTradePriceTrHrs : quote.LastTradePrice;
+            // LastTradePriceTrHrs is the last *trading hours* print, which is what Last shows
+            // in every phase: the live price during the session, that session's closing price
+            // once it is over. It is never the extended-hours print — a 04:15 trade belongs in
+            // the Ext column, not in Last. The fallback covers a symbol Questrade has no
+            // trading-hours print for at all, where some price beats an em dash.
+            var regularClose = Usable(quote.LastTradePriceTrHrs);
+            var price = regularClose ?? Usable(quote.LastTradePrice);
             if (price is null)
             {
-                // A zero would render as a real number and compute a -100% change, so a
-                // missing price field is skipped rather than defaulted.
                 continue;
             }
 
             decimal? extendedPrice = null;
-            decimal? regularClose = null;
             DateTimeOffset? extendedAt = null;
-            // quote.LastTradePrice cannot be null here: !regularHours means price was assigned
-            // from it just above, and a null price already `continue`d before this point.
-            //
-            // LastTradePriceTrHrs is the last *trading hours* print — yesterday's close before
-            // the bell, today's after it — which is exactly the baseline the Ext percentage is
-            // measured against. A null or zero one leaves the whole extended trio unset: a
-            // percentage with no denominator is worse than an em dash.
+            // Only outside the session, and only when there is a real regular close to measure
+            // against — LiveQuote.ExtendedChangePercent divides by Last, so a Last that fell
+            // back to the extended print itself would report a flat 0.00% move. An extended
+            // price equal to the close means nothing has traded since the bell, which is an
+            // em dash rather than a 0.00%.
             if (!regularHours
-                && quote.LastTradePriceTrHrs is { } regular
-                && regular != 0
-                && quote.LastTradePrice != regular)
+                && regularClose is { } close
+                && quote.LastTradePrice is { } lastTrade
+                && lastTrade != close)
             {
                 // Set together or not at all: LiveQuoteCache.Merge judges freshness by
                 // ExtendedAt, so a price without its own timestamp would mislabel when it
-                // happened, and one without its baseline cannot be rendered at all.
-                extendedPrice = quote.LastTradePrice;
-                regularClose = regular;
+                // happened.
+                extendedPrice = lastTrade;
                 extendedAt = now;
             }
 
-            var previousClose = previousCloses.TryGetValue(id, out var pc) ? pc : (decimal?)null;
+            var previousClose = previousCloses.TryGetValue(symbol, out var pc) ? pc : (decimal?)null;
 
             var mapped = new Quote(
-                symbol, price.Value, now,
-                quote.Volume, previousClose, extendedPrice, extendedAt, regularClose);
+                symbol, price.Value, now, quote.Volume, previousClose, extendedPrice, extendedAt);
 
             cache.ApplySnapshot(mapped, session);
         }
+    }
+
+    /// <summary>
+    /// A price Questrade actually has, or null. Zero is not a price: it is what the quote
+    /// carries for a field with nothing behind it, and left alone it renders as a real number
+    /// and computes a -100% change.
+    /// </summary>
+    private static decimal? Usable(decimal? price) => price is { } value && value != 0 ? value : null;
+
+    /// <summary>
+    /// The close of the last regular session before <paramref name="session"/> — the baseline
+    /// the displayed change percentage is measured against — keyed by ticker.
+    /// </summary>
+    /// <remarks>
+    /// Deliberately not Questrade's <c>prevDayClosePrice</c>, which both the quote and symbol
+    /// endpoints hand over for free in one batched call. That field rolls forward as soon as a
+    /// new trading day begins, so from pre-market onwards it reports the very close the row is
+    /// already showing as Last, and the change computes to exactly 0.00% until the opening
+    /// bell. Daily candles are the only Questrade source that reaches back the extra session.
+    ///
+    /// They cost one request per symbol, so this runs only for the symbols whose cached
+    /// baseline is missing or belongs to an earlier session — in steady state, once a day at
+    /// 09:30, when <see cref="MarketCalendar.DisplaySession"/> rolls over. Sequential, like
+    /// the resolver's own per-ticker lookups: the authenticator behind these calls is shared,
+    /// and a cold start's worth of parallel requests is not worth making it contend.
+    /// </remarks>
+    private async Task<Dictionary<string, decimal>> FetchPreviousClosesAsync(
+        IReadOnlyList<string> symbols,
+        IReadOnlyDictionary<string, int> resolved,
+        DateOnly session,
+        CancellationToken ct)
+    {
+        var closes = new Dictionary<string, decimal>(StringComparer.Ordinal);
+        if (symbols.Count == 0)
+        {
+            return closes;
+        }
+
+        var sessionStart = MarketCalendar.SessionStart(session);
+
+        // Far enough back to clear the longest run of non-trading days a US calendar produces
+        // — a holiday abutting a weekend — several times over. Only the last usable candle is
+        // read, so asking for extra days costs nothing but a slightly larger response.
+        var from = sessionStart.AddDays(-CandleLookbackDays);
+
+        foreach (var symbol in symbols)
+        {
+            if (!resolved.TryGetValue(symbol, out var id))
+            {
+                continue;
+            }
+
+            var candles = await client.GetDailyCandlesAsync(id, from, sessionStart, ct);
+
+            // Filtered on the candle's own start rather than trusting the endTime bound to be
+            // exclusive: a daily candle spans midnight to midnight, so one that merely touches
+            // the boundary is the session on screen, whose close is already Last. Including it
+            // would measure that session against itself.
+            var baseline = candles.LastOrDefault(candle => candle.Start < sessionStart);
+            if (baseline is not null)
+            {
+                closes[symbol] = baseline.Close;
+            }
+            else
+            {
+                // No exception and no default: the row simply renders an em dash for Chg%
+                // until a later tick finds history, which is the honest answer for a symbol
+                // with no full session behind it.
+                logger.LogDebug(
+                    "No daily candle before {Session} for {Symbol}; its change percentage "
+                    + "stays blank.", session, symbol);
+            }
+        }
+
+        return closes;
     }
 }

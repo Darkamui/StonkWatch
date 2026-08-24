@@ -79,9 +79,9 @@ public sealed class LiveQuoteCache(TimeProvider timeProvider)
     /// not win either: ties leave what is already there alone.
     /// </summary>
     /// <param name="session">
-    /// The trading session the previous close belongs to. Stored so the worker can tell a
-    /// current baseline from yesterday's; a stale one would silently skew every change
-    /// percentage for a whole day.
+    /// The session on screen, whose baseline <paramref name="quote"/> carries. Stored so the
+    /// worker can tell a current baseline from a carried-over one; a stale one would silently
+    /// skew every change percentage for a whole day.
     /// </param>
     /// <remarks>
     /// The stored quote is always replaced; subscribers hear about it only when something they
@@ -119,24 +119,19 @@ public sealed class LiveQuoteCache(TimeProvider timeProvider)
     /// deliberately excluded — they move on every poll by construction, so counting them
     /// would make this always true and the check pointless. <c>ChangePercent</c> needs no
     /// line of its own: it derives from <c>Last</c> and <c>PreviousClose</c>, both compared
-    /// here.
+    /// here. Nor does <c>ExtendedChangePercent</c>: it derives from <c>ExtendedPrice</c> and
+    /// <c>Last</c>, both of which are compared here too.
     /// </summary>
     private static bool RendersDifferently(LiveQuote before, LiveQuote after) =>
         before.Last != after.Last
         || before.PreviousClose != after.PreviousClose
         || before.Volume != after.Volume
-        || before.ExtendedPrice != after.ExtendedPrice
-        // Its own line, not covered by ExtendedPrice: at the closing bell the baseline flips
-        // from yesterday's close to today's, which moves the rendered Ext percentage even
-        // though the extended print itself has not changed.
-        || before.RegularClose != after.RegularClose;
+        || before.ExtendedPrice != after.ExtendedPrice;
 
     private static LiveQuote Create(string symbol, Quote quote, DateOnly session)
     {
-        // Extended price, its timestamp and its baseline are taken as a unit — see Merge.
-        var hasExtended = quote.ExtendedPrice is not null
-            && quote.ExtendedAt is not null
-            && quote.RegularClose is not null;
+        // Extended price and its timestamp are taken as a pair — see Merge.
+        var hasExtended = quote.ExtendedPrice is not null && quote.ExtendedAt is not null;
 
         return new LiveQuote(
             symbol,
@@ -144,8 +139,7 @@ public sealed class LiveQuoteCache(TimeProvider timeProvider)
             quote.PreviousClose, quote.PreviousClose is null ? null : session,
             quote.Volume, quote.Volume is null ? null : quote.At,
             hasExtended ? quote.ExtendedPrice : null,
-            hasExtended ? quote.ExtendedAt : null,
-            hasExtended ? quote.RegularClose : null);
+            hasExtended ? quote.ExtendedAt : null);
     }
 
     private static LiveQuote Merge(LiveQuote existing, Quote quote, DateOnly session)
@@ -160,14 +154,12 @@ public sealed class LiveQuoteCache(TimeProvider timeProvider)
         var volumeFresher = quote.Volume is not null
             && (existing.VolumeAt is null || quote.At > existing.VolumeAt);
 
-        // ExtendedPrice, ExtendedAt and RegularClose are taken as a unit, all or none, and
-        // judged by ExtendedAt's own clock (it is the actual timestamp of that trade, unlike
-        // Volume). All-or-none is the contract for producers — merging the fields
-        // independently would let a {ExtendedPrice: 65.20, ExtendedAt: null} payload pair a
-        // fresh price with a stale timestamp and mislabel when it happened, or pair today's
-        // extended print with yesterday's baseline and report a percentage neither supports.
+        // ExtendedPrice and ExtendedAt are taken as a pair, both or neither, and judged by
+        // ExtendedAt's own clock (it is the actual timestamp of that trade, unlike Volume).
+        // Both-or-neither is the contract for producers: merging them independently would let
+        // a {ExtendedPrice: 65.20, ExtendedAt: null} payload pair a fresh price with a stale
+        // timestamp and mislabel when it happened.
         var extendedFresher = quote.ExtendedPrice is not null && quote.ExtendedAt is not null
-            && quote.RegularClose is not null
             && (existing.ExtendedAt is null || quote.ExtendedAt > existing.ExtendedAt);
 
         return existing with
@@ -182,7 +174,6 @@ public sealed class LiveQuoteCache(TimeProvider timeProvider)
             VolumeAt = volumeFresher ? quote.At : existing.VolumeAt,
             ExtendedPrice = extendedFresher ? quote.ExtendedPrice : existing.ExtendedPrice,
             ExtendedAt = extendedFresher ? quote.ExtendedAt : existing.ExtendedAt,
-            RegularClose = extendedFresher ? quote.RegularClose : existing.RegularClose,
         };
     }
 
@@ -190,6 +181,11 @@ public sealed class LiveQuoteCache(TimeProvider timeProvider)
     /// Which of <paramref name="symbols"/> lack a previous close for
     /// <paramref name="session"/> — never seen, or carried over from an earlier session.
     /// </summary>
+    /// <remarks>
+    /// The caller pays one Questrade request per symbol returned here, so the session key
+    /// matters twice over: too coarse and every row's change percentage is measured against
+    /// the wrong day, too fine and the watchlist re-fetches its whole history on a timer.
+    /// </remarks>
     public IReadOnlyList<string> SymbolsNeedingPreviousClose(
         IEnumerable<string> symbols, DateOnly session) =>
         symbols
