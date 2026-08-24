@@ -148,11 +148,12 @@ public class LiveWatchlistPollJobTests(PostgresFixture fixture) : IAsyncLifetime
         Assert.Equal(150.50m, quote!.Last);
         Assert.Null(quote.ExtendedPrice);
         Assert.Null(quote.ExtendedAt);
+        Assert.Null(quote.RegularClose);
         Assert.Equal(1_000_000L, quote.Volume);
     }
 
     [Fact]
-    public async Task Outside_regular_hours_uses_lastTradePrice_and_sets_the_extended_pair()
+    public async Task Outside_regular_hours_uses_lastTradePrice_and_sets_the_extended_trio()
     {
         _time.SetUtcNow(AfterHours);
         var (watchlist, db) = NewWatchlistService();
@@ -179,6 +180,47 @@ public class LiveWatchlistPollJobTests(PostgresFixture fixture) : IAsyncLifetime
         Assert.NotNull(quote.ExtendedAt);
         Assert.Equal(151.25m, quote.ExtendedPrice);
         Assert.Equal(AfterHours, quote.ExtendedAt);
+
+        // lastTradePriceTrHrs is the last regular-session print, which is what the Ext
+        // percentage is measured against — 151.25 off a 150.50 close is +0.50%.
+        Assert.Equal(150.50m, quote.RegularClose);
+        Assert.Equal(0.50m, Math.Round(quote.ExtendedChangePercent!.Value, 2));
+    }
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData(0.0)]
+    public async Task Outside_regular_hours_a_missing_baseline_sets_no_extended_trio(
+        double? regularHoursPrice)
+    {
+        _time.SetUtcNow(AfterHours);
+        var (watchlist, db) = NewWatchlistService();
+        await using var _ = db;
+        await watchlist.AddItemAsync(new CreateWatchlistItemRequest("AAPL"));
+
+        var resolver = new FakeResolver(new Dictionary<string, int> { ["AAPL"] = 1 });
+        var client = new FakeQuoteClient
+        {
+            Quotes = new Dictionary<int, QuestradeQuote>
+            {
+                [1] = new QuestradeQuote(1, "AAPL", 151.25m, (decimal?)regularHoursPrice, 1_000_000)
+            }
+        };
+        var cache = new LiveQuoteCache(_time);
+        var job = NewJob(watchlist, resolver, client, cache);
+
+        await job.RunAsync();
+
+        // The extended print itself is fine and still becomes Last; only Ext is unrenderable.
+        // A percentage over a null or zero denominator is either nothing or nonsense, and the
+        // trio moves as a unit, so none of it is stored.
+        var quote = cache.Get("AAPL");
+        Assert.NotNull(quote);
+        Assert.Equal(151.25m, quote!.Last);
+        Assert.Null(quote.ExtendedPrice);
+        Assert.Null(quote.ExtendedAt);
+        Assert.Null(quote.RegularClose);
+        Assert.Null(quote.ExtendedChangePercent);
     }
 
     [Fact]
@@ -207,6 +249,7 @@ public class LiveWatchlistPollJobTests(PostgresFixture fixture) : IAsyncLifetime
         Assert.Equal(150.50m, quote!.Last);
         Assert.Null(quote.ExtendedPrice);
         Assert.Null(quote.ExtendedAt);
+        Assert.Null(quote.RegularClose);
     }
 
     [Fact]

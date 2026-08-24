@@ -313,5 +313,6 @@ public static class WatchlistEndpoints
         item.Id, item.GroupId, item.Symbol,
         item.DisplayName ?? item.Symbol,
         item.SortOrder,
-        quote?.Last, quote?.ChangePercent, quote?.Volume, quote?.ExtendedPrice, quote?.LastAt);
+        quote?.Last, quote?.ChangePercent, quote?.Volume, quote?.ExtendedChangePercent,
+        quote?.LastAt);
 }

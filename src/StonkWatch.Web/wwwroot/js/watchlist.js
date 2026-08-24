@@ -355,16 +355,17 @@
         volume.textContent = formatVolume(item.volume);
         volume.className = isBlank(item.volume) ? 'num empty' : 'num';
 
-        // Extended-hours price. Blank outside pre/post market rather than repeating
-        // Last — showing the regular-session price under an "Ext" heading would assert
-        // after-hours trading that did not happen.
+        // The extended-hours move, as a percentage off the regular close — the same thing a
+        // broker's Ext column shows. It used to be a price, which outside regular hours was
+        // the very number already in Last. Blank during the session: there is no extended
+        // print to measure, and a 0.00% would assert after-hours trading that did not happen.
         var ext = numCell(el, 'ext');
-        if (isBlank(item.extendedPrice)) {
+        if (isBlank(item.extendedChangePercent)) {
             ext.textContent = '—';
             ext.className = 'num empty';
         } else {
-            ext.textContent = priceFmt.format(item.extendedPrice);
-            ext.className = 'num';
+            ext.textContent = pctFmt.format(item.extendedChangePercent) + '%';
+            ext.className = 'num ' + (item.extendedChangePercent >= 0 ? 'up' : 'down');
         }
 
         // An unchanged price does not flash. The old `>=` sent every equal value down the

@@ -125,12 +125,18 @@ public sealed class LiveQuoteCache(TimeProvider timeProvider)
         before.Last != after.Last
         || before.PreviousClose != after.PreviousClose
         || before.Volume != after.Volume
-        || before.ExtendedPrice != after.ExtendedPrice;
+        || before.ExtendedPrice != after.ExtendedPrice
+        // Its own line, not covered by ExtendedPrice: at the closing bell the baseline flips
+        // from yesterday's close to today's, which moves the rendered Ext percentage even
+        // though the extended print itself has not changed.
+        || before.RegularClose != after.RegularClose;
 
     private static LiveQuote Create(string symbol, Quote quote, DateOnly session)
     {
-        // Extended price and its timestamp are taken as a unit — see Merge for why.
-        var hasExtended = quote.ExtendedPrice is not null && quote.ExtendedAt is not null;
+        // Extended price, its timestamp and its baseline are taken as a unit — see Merge.
+        var hasExtended = quote.ExtendedPrice is not null
+            && quote.ExtendedAt is not null
+            && quote.RegularClose is not null;
 
         return new LiveQuote(
             symbol,
@@ -138,7 +144,8 @@ public sealed class LiveQuoteCache(TimeProvider timeProvider)
             quote.PreviousClose, quote.PreviousClose is null ? null : session,
             quote.Volume, quote.Volume is null ? null : quote.At,
             hasExtended ? quote.ExtendedPrice : null,
-            hasExtended ? quote.ExtendedAt : null);
+            hasExtended ? quote.ExtendedAt : null,
+            hasExtended ? quote.RegularClose : null);
     }
 
     private static LiveQuote Merge(LiveQuote existing, Quote quote, DateOnly session)
@@ -153,12 +160,14 @@ public sealed class LiveQuoteCache(TimeProvider timeProvider)
         var volumeFresher = quote.Volume is not null
             && (existing.VolumeAt is null || quote.At > existing.VolumeAt);
 
-        // ExtendedPrice and ExtendedAt are taken as a unit, both or neither, and judged by
-        // ExtendedAt's own clock (it is the actual timestamp of that trade, unlike Volume).
-        // Both-or-neither is the contract for producers — merging the fields independently
-        // would let a {ExtendedPrice: 65.20, ExtendedAt: null} payload pair a fresh price
-        // with a stale timestamp and mislabel when it happened.
+        // ExtendedPrice, ExtendedAt and RegularClose are taken as a unit, all or none, and
+        // judged by ExtendedAt's own clock (it is the actual timestamp of that trade, unlike
+        // Volume). All-or-none is the contract for producers — merging the fields
+        // independently would let a {ExtendedPrice: 65.20, ExtendedAt: null} payload pair a
+        // fresh price with a stale timestamp and mislabel when it happened, or pair today's
+        // extended print with yesterday's baseline and report a percentage neither supports.
         var extendedFresher = quote.ExtendedPrice is not null && quote.ExtendedAt is not null
+            && quote.RegularClose is not null
             && (existing.ExtendedAt is null || quote.ExtendedAt > existing.ExtendedAt);
 
         return existing with
@@ -173,6 +182,7 @@ public sealed class LiveQuoteCache(TimeProvider timeProvider)
             VolumeAt = volumeFresher ? quote.At : existing.VolumeAt,
             ExtendedPrice = extendedFresher ? quote.ExtendedPrice : existing.ExtendedPrice,
             ExtendedAt = extendedFresher ? quote.ExtendedAt : existing.ExtendedAt,
+            RegularClose = extendedFresher ? quote.RegularClose : existing.RegularClose,
         };
     }
 

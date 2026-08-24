@@ -71,7 +71,8 @@ public class LiveQuoteCacheTests
         cache.ApplySnapshot(
             new Quote(
                 "ASTS", 60.00m, Now,
-                Volume: 5_030_000, ExtendedPrice: 61.20m, ExtendedAt: Now.AddMinutes(30)),
+                Volume: 5_030_000, ExtendedPrice: 61.20m, ExtendedAt: Now.AddMinutes(30),
+                RegularClose: 60.00m),
             Session);
 
         var quote = cache.Get("ASTS")!;
@@ -79,6 +80,7 @@ public class LiveQuoteCacheTests
         Assert.Equal(Now, quote.VolumeAt);
         Assert.Equal(61.20m, quote.ExtendedPrice);
         Assert.Equal(Now.AddMinutes(30), quote.ExtendedAt);
+        Assert.Equal(60.00m, quote.RegularClose);
     }
 
     [Fact]
@@ -88,14 +90,16 @@ public class LiveQuoteCacheTests
         cache.ApplySnapshot(
             new Quote(
                 "ASTS", 60.00m, Now,
-                Volume: 5_000_000, ExtendedPrice: 61.00m, ExtendedAt: Now.AddMinutes(30)),
+                Volume: 5_000_000, ExtendedPrice: 61.00m, ExtendedAt: Now.AddMinutes(30),
+                RegularClose: 60.00m),
             Session);
 
         var later = Now.AddMinutes(10);
         cache.ApplySnapshot(
             new Quote(
                 "ASTS", 62.00m, later,
-                Volume: 5_500_000, ExtendedPrice: 62.50m, ExtendedAt: Now.AddMinutes(45)),
+                Volume: 5_500_000, ExtendedPrice: 62.50m, ExtendedAt: Now.AddMinutes(45),
+                RegularClose: 61.50m),
             Session);
 
         var quote = cache.Get("ASTS")!;
@@ -103,6 +107,7 @@ public class LiveQuoteCacheTests
         Assert.Equal(later, quote.VolumeAt);
         Assert.Equal(62.50m, quote.ExtendedPrice);
         Assert.Equal(Now.AddMinutes(45), quote.ExtendedAt);
+        Assert.Equal(61.50m, quote.RegularClose);
     }
 
     [Fact]
@@ -121,24 +126,68 @@ public class LiveQuoteCacheTests
         Assert.Equal(Now, quote.VolumeAt);
     }
 
-    [Fact]
-    public void ApplySnapshot_ignores_an_extended_price_reported_without_its_own_timestamp()
+    [Theory]
+    [InlineData("timestamp")]
+    [InlineData("baseline")]
+    public void ApplySnapshot_ignores_an_extended_price_missing_part_of_its_trio(string missing)
     {
         var cache = NewCache();
         cache.ApplySnapshot(
-            new Quote("ASTS", 60.00m, Now, ExtendedPrice: 61.00m, ExtendedAt: Now.AddMinutes(30)),
+            new Quote(
+                "ASTS", 60.00m, Now, ExtendedPrice: 61.00m, ExtendedAt: Now.AddMinutes(30),
+                RegularClose: 60.00m),
             Session);
 
-        // Both-or-neither is the contract for producers, but the cache does not trust it: a
-        // payload can still arrive with one and not the other. Taking the price alone would
-        // stamp a fresh price with a stale timestamp — a wrong claim about when it happened.
+        // All-or-none is the contract for producers, but the cache does not trust it: a
+        // payload can still arrive with part of the trio. Taking the price alone would stamp
+        // a fresh price with a stale timestamp — a wrong claim about when it happened — or
+        // divide it by yesterday's baseline and report a percentage nothing supports.
+        var later = Now.AddMinutes(10);
         cache.ApplySnapshot(
-            new Quote("ASTS", 63.00m, Now.AddMinutes(10), ExtendedPrice: 65.20m, ExtendedAt: null),
+            missing == "timestamp"
+                ? new Quote(
+                    "ASTS", 63.00m, later, ExtendedPrice: 65.20m, ExtendedAt: null,
+                    RegularClose: 62.00m)
+                : new Quote(
+                    "ASTS", 63.00m, later, ExtendedPrice: 65.20m, ExtendedAt: later,
+                    RegularClose: null),
             Session);
 
         var quote = cache.Get("ASTS")!;
         Assert.Equal(61.00m, quote.ExtendedPrice);
         Assert.Equal(Now.AddMinutes(30), quote.ExtendedAt);
+        Assert.Equal(60.00m, quote.RegularClose);
+    }
+
+    [Fact]
+    public void ExtendedChangePercent_measures_the_extended_print_against_the_regular_close()
+    {
+        // After the bell: today's session closed at 66.00 and the stock traded up to 68.10
+        // after hours. Ext is that move — +3.18% — not the move since yesterday's close,
+        // which is what ChangePercent already reports.
+        var quote = new LiveQuote(
+            "ASTS", Last: 68.10m, PreviousClose: 60.00m,
+            ExtendedPrice: 68.10m, ExtendedAt: Now, RegularClose: 66.00m);
+
+        Assert.Equal(3.18m, Math.Round(quote.ExtendedChangePercent!.Value, 2));
+        Assert.Equal(13.50m, Math.Round(quote.ChangePercent!.Value, 2));
+    }
+
+    [Theory]
+    [InlineData(null, 66.00)]
+    [InlineData(68.10, null)]
+    [InlineData(68.10, 0.0)]
+    public void ExtendedChangePercent_is_null_without_a_price_and_a_non_zero_baseline(
+        double? extended, double? regularClose)
+    {
+        // Null, never 0.00%: during the regular session there is no extended print at all,
+        // and "flat since the close" is a different claim from "no after-hours trading".
+        var quote = new LiveQuote(
+            "ASTS", Last: 68.10m,
+            ExtendedPrice: (decimal?)extended, ExtendedAt: Now,
+            RegularClose: (decimal?)regularClose);
+
+        Assert.Null(quote.ExtendedChangePercent);
     }
 
     [Fact]
@@ -275,6 +324,33 @@ public class LiveQuoteCacheTests
         Assert.Equal(67.75m, enumerator.Current.Last);
     }
 
+    [Fact]
+    public async Task A_moved_extended_baseline_publishes_even_when_the_extended_price_holds()
+    {
+        var cache = NewCache();
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+        cache.ApplySnapshot(
+            new Quote(
+                "ASTS", 68.10m, Now, ExtendedPrice: 68.10m, ExtendedAt: Now,
+                RegularClose: 66.00m),
+            Session);
+
+        var enumerator = cache.SubscribeAsync(cts.Token).GetAsyncEnumerator(cts.Token);
+
+        // The closing bell: the same extended print is now measured against today's close
+        // instead of yesterday's, so the rendered percentage moves while every price on the
+        // row stands still. ExtendedPrice alone cannot see this.
+        var later = Now.AddSeconds(3);
+        cache.ApplySnapshot(
+            new Quote(
+                "ASTS", 68.10m, later, ExtendedPrice: 68.10m, ExtendedAt: later,
+                RegularClose: 67.00m),
+            Session);
+
+        Assert.True(await enumerator.MoveNextAsync());
+        Assert.Equal(67.00m, enumerator.Current.RegularClose);
+    }
+
     [Theory]
     [InlineData("volume")]
     [InlineData("previousClose")]
@@ -298,7 +374,7 @@ public class LiveQuoteCacheTests
             "previousClose" => new Quote("ASTS", 67.61m, at, Volume: 1_000, PreviousClose: 65.00m),
             _ => new Quote(
                 "ASTS", 67.61m, at, Volume: 1_000, PreviousClose: 66.00m,
-                ExtendedPrice: 68.10m, ExtendedAt: at),
+                ExtendedPrice: 68.10m, ExtendedAt: at, RegularClose: 66.00m),
         };
 
         cache.ApplySnapshot(quote, Session);

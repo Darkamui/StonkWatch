@@ -15,7 +15,8 @@ public record LiveQuote(
     long? Volume = null,
     DateTimeOffset? VolumeAt = null,
     decimal? ExtendedPrice = null,
-    DateTimeOffset? ExtendedAt = null)
+    DateTimeOffset? ExtendedAt = null,
+    decimal? RegularClose = null)
 {
     /// <summary>
     /// Null — never zero — when there is no baseline to measure against. A fabricated
@@ -25,5 +26,22 @@ public record LiveQuote(
     public decimal? ChangePercent =>
         Last is { } last && PreviousClose is { } previousClose && previousClose != 0
             ? (last - previousClose) / previousClose * 100m
+            : null;
+
+    /// <summary>
+    /// How far the extended-hours print has moved off the regular session, as a percentage —
+    /// what a broker's "Ext" column shows. Measured against <see cref="RegularClose"/>, not
+    /// <see cref="PreviousClose"/>: after the bell those are different days, and the
+    /// interesting number is the move since today's close, not since yesterday's.
+    /// </summary>
+    /// <remarks>
+    /// Pre-market is the degenerate case, and deliberately so. No regular session has happened
+    /// yet, so <see cref="RegularClose"/> is the previous day's close and this reads the same
+    /// as <see cref="ChangePercent"/>. That is the honest answer rather than a coincidence to
+    /// paper over: the pre-market move and the move since the last close are the same move.
+    /// </remarks>
+    public decimal? ExtendedChangePercent =>
+        ExtendedPrice is { } extended && RegularClose is { } regularClose && regularClose != 0
+            ? (extended - regularClose) / regularClose * 100m
             : null;
 }

@@ -117,15 +117,25 @@ public class LiveWatchlistPollJob(
             }
 
             decimal? extendedPrice = null;
+            decimal? regularClose = null;
             DateTimeOffset? extendedAt = null;
             // quote.LastTradePrice cannot be null here: !regularHours means price was assigned
             // from it just above, and a null price already `continue`d before this point.
-            if (!regularHours && quote.LastTradePrice != quote.LastTradePriceTrHrs)
+            //
+            // LastTradePriceTrHrs is the last *trading hours* print — yesterday's close before
+            // the bell, today's after it — which is exactly the baseline the Ext percentage is
+            // measured against. A null or zero one leaves the whole extended trio unset: a
+            // percentage with no denominator is worse than an em dash.
+            if (!regularHours
+                && quote.LastTradePriceTrHrs is { } regular
+                && regular != 0
+                && quote.LastTradePrice != regular)
             {
                 // Set together or not at all: LiveQuoteCache.Merge judges freshness by
                 // ExtendedAt, so a price without its own timestamp would mislabel when it
-                // happened.
+                // happened, and one without its baseline cannot be rendered at all.
                 extendedPrice = quote.LastTradePrice;
+                regularClose = regular;
                 extendedAt = now;
             }
 
@@ -133,7 +143,7 @@ public class LiveWatchlistPollJob(
 
             var mapped = new Quote(
                 symbol, price.Value, now,
-                quote.Volume, previousClose, extendedPrice, extendedAt);
+                quote.Volume, previousClose, extendedPrice, extendedAt, regularClose);
 
             cache.ApplySnapshot(mapped, session);
         }

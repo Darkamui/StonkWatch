@@ -254,6 +254,15 @@ The script does a `GET /api/watchlist` for the full view, then opens an `EventSo
 - **A missing value renders `—`, never `0`.** The opening burst can arrive with every price
   null — the poller does nothing while nobody has the sidebar open — and a null `changePercent`
   is tinted neither green nor red. `0.00%` claims "flat today", which is a different fact.
+- **`Ext` is a percentage, not a price.** Outside regular hours `Last` already *is* the
+  extended print, so a second price column repeated it verbatim. `Ext` now carries
+  `extendedChangePercent` — the move off `LiveQuote.RegularClose`, Questrade's
+  `lastTradePriceTrHrs`, which is yesterday's close before the bell and today's after it. That
+  differs from `Chg%` (measured off `prevDayClosePrice`) exactly when it should: after hours,
+  `Chg%` is the whole two-session move and `Ext` is only what happened since the close. In
+  pre-market the two coincide, because no regular session has happened yet — the same move
+  measured twice, not a bug. During the session `Ext` is blank: there is no extended print, and
+  `0.00%` would assert after-hours trading that did not happen.
 - **The `ping` keepalive is ignored on purpose.** It carries `null`, not a row; a listener that
   parsed it as a quote would throw on the first property access.
 - **A 503 is a state, not a fault.** With the feature switched off the stream never opens; the
@@ -312,7 +321,9 @@ Three consequences worth knowing:
   status line reads "live", "pre-market", "after hours" or "market closed" from it.
 
 A closed market therefore produces no visual churn even before the cadence change, because
-`LiveQuoteCache.ApplySnapshot` publishes only when a rendered field actually differs — the
+`LiveQuoteCache.ApplySnapshot` publishes only when a rendered field actually differs (the
+extended baseline included: at the closing bell it flips from yesterday's close to today's,
+moving the rendered percentage while every price on the row stands still) — the
 merged record's `LastAt` advances on every poll, so publishing unconditionally repainted every
 row on every tick. A symbol's first snapshot always publishes, even if every field is null:
 that frame is what tells an open sidebar the row exists.

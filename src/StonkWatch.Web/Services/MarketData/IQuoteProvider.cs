@@ -7,7 +7,8 @@ public record Quote(
     long? Volume = null,
     decimal? PreviousClose = null,
     decimal? ExtendedPrice = null,
-    DateTimeOffset? ExtendedAt = null);
+    DateTimeOffset? ExtendedAt = null,
+    decimal? RegularClose = null);
 
 public interface IQuoteProvider
 {

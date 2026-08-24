@@ -28,6 +28,12 @@ public record ReorderEntry(Guid Id, Guid? GroupId, int SortOrder);
 public record ReorderRequest(IReadOnlyList<ReorderEntry> Items);
 
 /// <summary>One rendered row: the stored item joined to whatever the cache currently knows.</summary>
+/// <param name="ExtendedChangePercent">
+/// The extended-hours move as a percentage, not a price. A second price column repeated
+/// <paramref name="Last"/> outside regular hours — <c>Last</c> already *is* the extended print
+/// then — which told the reader nothing. Null during the regular session and whenever there is
+/// no extended print to measure.
+/// </param>
 public record WatchlistRowDto(
     Guid Id,
     Guid? GroupId,
@@ -37,7 +43,7 @@ public record WatchlistRowDto(
     decimal? Last,
     decimal? ChangePercent,
     long? Volume,
-    decimal? ExtendedPrice,
+    decimal? ExtendedChangePercent,
     DateTimeOffset? LastAt);
 
 /// <summary>

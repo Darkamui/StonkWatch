@@ -66,7 +66,7 @@ Things that will bite if you change this code:
 
 ## Current state
 
-- **375 tests** in `tests/StonkWatch.Web.Tests`. Keep them green; add to them.
+- **383 tests** in `tests/StonkWatch.Web.Tests`. Keep them green; add to them.
 - **The live watchlist is built** — Questrade auth, polling, the API, the SSE stream, and the
   right-docked sidebar (`_WatchlistSidebar.cshtml` + `wwwroot/js/watchlist.js`), rendered from
   `_Layout.cshtml` for signed-in users only. The stream also carries a `phase` event, and
