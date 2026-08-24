@@ -1,7 +1,7 @@
 # StonkWatch Documentation
 
-Self-hosted swing-trade watchlist tracker. One ASP.NET Core process serves three
-front doors — a Razor Pages UI, a JSON API, and an MCP server — over one Postgres database.
+Self-hosted swing-trade watchlist tracker. One ASP.NET Core process serves two
+front doors — a Razor Pages UI and a JSON API — over one Postgres database.
 
 ## Read these in order
 
@@ -10,7 +10,7 @@ front doors — a Razor Pages UI, a JSON API, and an MCP server — over one Pos
 | [architecture.md](architecture.md) | How the pieces fit, request flow, layering rules |
 | [data-model.md](data-model.md) | Entities, enums, field meanings, migration workflow |
 | [conventions.md](conventions.md) | How to write code here — patterns, naming, PR checklist |
-| [api-and-mcp.md](api-and-mcp.md) | Endpoint + tool reference, contract semantics |
+| [api.md](api.md) | Endpoint reference, contract semantics |
 | [operations.md](operations.md) | Local setup, config, deploy, runbook |
 | [tech-assessment.md](tech-assessment.md) | Is the stack right for the planned features? |
 
@@ -25,14 +25,15 @@ flowchart LR
 
 1. **Run it** — [operations.md § Local development](operations.md#local-development). ~10 min, needs .NET SDK + Docker.
 2. **Learn the domain** — [data-model.md](data-model.md). Everything is a `Candidate` with price levels; `Alert`s watch those levels; `ReviewLogEntry` records what you thought and when.
-3. **Learn the layers** — [architecture.md](architecture.md). The one rule: business logic lives in `Services/`, never in an endpoint, page model, or MCP tool.
+3. **Learn the layers** — [architecture.md](architecture.md). The one rule: business logic lives in `Services/`, never in an endpoint or page model.
 4. **Make a change** — [conventions.md](conventions.md) has the checklist.
 
 ## The one-paragraph version
 
-A single user tracks swing-trade candidates. Data is entered two ways: by hand
-through the Razor UI, or by Claude through the MCP server (`"add ASTS as high
-priority, watching the $59-60 reclaim"`). Both paths call the same
+A single user tracks swing-trade candidates. Candidates are added and updated by pasting
+JSON into the Razor UI — the Add page has no validation beyond parseable JSON, while the
+Candidate Detail page's Update button snapshots the prior state to history before applying
+the new one. Both the UI and the JSON API call the same
 [`CandidateService`](../src/StonkWatch.Web/Services/CandidateService.cs), which owns all
 validation and persistence. An opt-in background worker polls prices during market hours,
 compares them to each candidate's levels, and emails a digest when something crosses.
@@ -48,7 +49,6 @@ StonkWatch/
 │   ├── Contracts/               ← DTOs + request records (the public shape)
 │   ├── Data/                    ← EF Core entities, DbContext, migrations, enums
 │   ├── Endpoints/               ← minimal-API route groups under /api/*
-│   ├── Mcp/                     ← MCP tool definitions served at /mcp
 │   ├── Pages/                   ← Razor Pages UI
 │   ├── Services/                ← business logic (the only place it lives)
 │   │   ├── MarketData/          ← live quote cache; Questrade/ (watchlist), Twelve Data (monitoring)

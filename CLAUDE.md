@@ -1,8 +1,8 @@
 # StonkWatch — working notes for Claude
 
 Self-hosted swing-trade watchlist tracker. One ASP.NET Core 10 process serves a Razor Pages
-UI, a JSON API (`/api/*`), and an MCP server (`/mcp`), all backed by Postgres via EF Core.
-Single user, single instance, no multi-tenancy.
+UI and a JSON API (`/api/*`), all backed by Postgres via EF Core. Single user, single
+instance, no multi-tenancy.
 
 **Full documentation is in [docs/](docs/README.md).** Read
 [docs/conventions.md](docs/conventions.md) before writing code and
@@ -10,18 +10,18 @@ Single user, single instance, no multi-tenancy.
 
 ## Non-negotiables
 
-1. **Business logic goes in `Services/`.** Razor page models, endpoint lambdas, and MCP
-   tools are thin adapters — they parse input, call a service, map the result. Never inject
+1. **Business logic goes in `Services/`.** Razor page models and endpoint lambdas are thin
+   adapters — they parse input, call a service, map the result. Never inject
    `StonkWatchDbContext` into an adapter.
 2. **Accept loose input, store strict types.** Enum-ish fields on request records are
-   `string?` so natural-language MCP calls work; `EnumParsing.ParseOrDefault` coerces them.
+   `string?` so pasted JSON (`"priority": "high"`) works without exact C# casing;
+   `EnumParsing.ParseOrDefault` coerces them.
 3. **Inject `TimeProvider`.** Never call `DateTimeOffset.UtcNow` inside a service.
 4. **`decimal` for money** (`numeric(18,4)` — add new price columns to the `HasPrecision`
    loop in `StonkWatchDbContext`). **UTC for timestamps** — Npgsql rejects non-UTC
    `DateTimeOffset` on `timestamptz`.
 5. **Domain errors are exceptions.** Throw `ValidationException` / `ConflictException` from
-   services; each adapter maps them. MCP tools must wrap calls in `Guarded()` or the SDK
-   replaces the message.
+   services; each adapter maps them.
 6. **PATCH is three-way**: omitted → unchanged, `""` → clear, value → set. Use `MergeString`.
 7. **Secrets never leave configuration.** No API keys in code, logs, `appsettings.json`, or
    anything rendered to a page. Compare secrets with `CryptographicOperations.FixedTimeEquals`.
@@ -44,7 +44,7 @@ dotnet ef database update
 ## Adding a field — the six places
 
 `Data/Entities` → migration → `Contracts` (Dto + Create + Update) → `Services`
-(Create/Update/`ToDto`) → adapters (endpoint, MCP tool, Razor form) → test.
+(Create/Update/`ToDto`) → adapters (endpoint, Razor form) → test.
 Forgetting the service mapping is the usual bug.
 
 ## Price monitoring (Tier 1)
@@ -66,7 +66,14 @@ Things that will bite if you change this code:
 
 ## Current state
 
-- **400 tests** in `tests/StonkWatch.Web.Tests`. Keep them green; add to them.
+- **403 tests** in `tests/StonkWatch.Web.Tests`. Keep them green; add to them.
+- **Add/Update Candidate is JSON-only.** The Add Candidate page and the Candidate Detail
+  page's Update button both take a pasted JSON blob (`CandidateJsonInput`), not a
+  field-by-field form. Add has no validation beyond parseable JSON; Update snapshots the
+  candidate's prior state to `CandidateHistoryEntry` (`previous_state jsonb`) before applying
+  the new one, via `CandidateService.UpdateWithHistoryAsync`. History browsing isn't built
+  yet. The MCP server that used to provide loose natural-language entry has been removed —
+  this JSON flow replaces it.
 - **The live watchlist is built** — Questrade auth, polling, the API, the SSE stream, and the
   right-docked sidebar (`_WatchlistSidebar.cshtml` + `wwwroot/js/watchlist.js`), rendered from
   `_Layout.cshtml` for signed-in users only. The stream also carries a `phase` event, and

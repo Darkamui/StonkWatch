@@ -203,6 +203,58 @@ public class CandidateServiceTests(PostgresFixture fixture) : IAsyncLifetime
         Assert.NotNull(await service.UpdateAsync("asts", new UpdateCandidateRequest(Company: "AST")));
     }
 
+    // ---------- Update with history (the JSON "Update" flow) ----------
+
+    [Fact]
+    public async Task UpdateWithHistoryAsync_snapshots_the_prior_state_before_applying_changes()
+    {
+        await SeedAsync(new CreateCandidateRequest("ASTS", Thesis: "Original thesis", SupportLow: 52m));
+
+        var (service, db) = NewService();
+        await using var _ = db;
+        var updated = await service.UpdateWithHistoryAsync(
+            "ASTS", new UpdateCandidateRequest(Thesis: "New thesis", SupportLow: 53m));
+
+        Assert.Equal("New thesis", updated!.Thesis);
+        Assert.Equal(53m, updated.SupportLow);
+
+        await using var check = fixture.CreateContext();
+        var entry = Assert.Single(await check.CandidateHistoryEntries.ToListAsync());
+        Assert.Contains("Original thesis", entry.PreviousState);
+        Assert.Contains("52", entry.PreviousState);
+        Assert.Equal(Now, entry.SnapshotAt);
+    }
+
+    [Fact]
+    public async Task UpdateWithHistoryAsync_appends_a_new_entry_per_update_rather_than_replacing()
+    {
+        await SeedAsync(new CreateCandidateRequest("ASTS", Thesis: "First"));
+
+        var (service, db) = NewService();
+        await using var _ = db;
+        await service.UpdateWithHistoryAsync("ASTS", new UpdateCandidateRequest(Thesis: "Second"));
+        _time.Advance(TimeSpan.FromHours(1));
+        await service.UpdateWithHistoryAsync("ASTS", new UpdateCandidateRequest(Thesis: "Third"));
+
+        await using var check = fixture.CreateContext();
+        var entries = await check.CandidateHistoryEntries.OrderBy(e => e.SnapshotAt).ToListAsync();
+        Assert.Equal(2, entries.Count);
+        Assert.Contains("First", entries[0].PreviousState);
+        Assert.Contains("Second", entries[1].PreviousState);
+    }
+
+    [Fact]
+    public async Task UpdateWithHistoryAsync_returns_null_for_an_unknown_ticker_without_recording_history()
+    {
+        var (service, db) = NewService();
+        await using var _ = db;
+
+        Assert.Null(await service.UpdateWithHistoryAsync("NOPE", new UpdateCandidateRequest(Company: "x")));
+
+        await using var check = fixture.CreateContext();
+        Assert.Empty(await check.CandidateHistoryEntries.ToListAsync());
+    }
+
     // ---------- Review logging ----------
 
     [Fact]
@@ -319,6 +371,7 @@ public class CandidateServiceTests(PostgresFixture fixture) : IAsyncLifetime
 
         await service.AddAlertAsync("ASTS", new CreateAlertRequest("PrimarySupport", 52m, 55m));
         await service.LogReviewAsync("ASTS", new LogReviewRequest(WhatChanged: "note"));
+        await service.UpdateWithHistoryAsync("ASTS", new UpdateCandidateRequest(Company: "AST"));
 
         Assert.True(await service.DeleteAsync("ASTS"));
 
@@ -326,6 +379,7 @@ public class CandidateServiceTests(PostgresFixture fixture) : IAsyncLifetime
         Assert.Empty(await check.Candidates.ToListAsync());
         Assert.Empty(await check.Alerts.ToListAsync());
         Assert.Empty(await check.ReviewLogs.ToListAsync());
+        Assert.Empty(await check.CandidateHistoryEntries.ToListAsync());
     }
 
     [Fact]

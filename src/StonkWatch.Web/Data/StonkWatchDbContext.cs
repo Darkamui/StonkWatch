@@ -8,6 +8,7 @@ public class StonkWatchDbContext(DbContextOptions<StonkWatchDbContext> options) 
     public DbSet<Candidate> Candidates => Set<Candidate>();
     public DbSet<Alert> Alerts => Set<Alert>();
     public DbSet<ReviewLogEntry> ReviewLogs => Set<ReviewLogEntry>();
+    public DbSet<CandidateHistoryEntry> CandidateHistoryEntries => Set<CandidateHistoryEntry>();
     public DbSet<JobRun> JobRuns => Set<JobRun>();
     public DbSet<WatchlistGroup> WatchlistGroups => Set<WatchlistGroup>();
     public DbSet<WatchlistItem> WatchlistItems => Set<WatchlistItem>();
@@ -48,6 +49,11 @@ public class StonkWatchDbContext(DbContextOptions<StonkWatchDbContext> options) 
                 .WithOne(r => r.Candidate)
                 .HasForeignKey(r => r.CandidateId)
                 .OnDelete(DeleteBehavior.Cascade);
+
+            e.HasMany(c => c.HistoryEntries)
+                .WithOne(h => h.Candidate)
+                .HasForeignKey(h => h.CandidateId)
+                .OnDelete(DeleteBehavior.Cascade);
         });
 
         modelBuilder.Entity<Alert>(e =>
@@ -87,6 +93,14 @@ public class StonkWatchDbContext(DbContextOptions<StonkWatchDbContext> options) 
             e.Property(r => r.StatusAtReview).HasConversion<string>().HasMaxLength(20);
             e.Property(r => r.ThesisImpact).HasConversion<string>().HasMaxLength(20);
             e.Property(r => r.Price).HasPrecision(18, 4);
+        });
+
+        modelBuilder.Entity<CandidateHistoryEntry>(e =>
+        {
+            e.ToTable("candidate_history_entries");
+            e.HasKey(h => h.Id);
+            e.Property(h => h.PreviousState).HasColumnType("jsonb");
+            e.HasIndex(h => new { h.CandidateId, h.SnapshotAt });
         });
 
         modelBuilder.Entity<WatchlistGroup>(e =>

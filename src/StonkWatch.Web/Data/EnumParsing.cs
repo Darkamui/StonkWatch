@@ -4,7 +4,7 @@ public static class EnumParsing
 {
     /// <summary>
     /// Parses loosely-formatted text ("near trigger", "Near-Trigger", "NEAR_TRIGGER") into an enum member,
-    /// so callers (MCP tools, API clients) don't need to know the exact C# casing/spelling.
+    /// so callers (pasted JSON, API clients) don't need to know the exact C# casing/spelling.
     /// Returns <paramref name="current"/> unchanged when <paramref name="raw"/> is null.
     /// </summary>
     public static TEnum ParseOrDefault<TEnum>(string? raw, TEnum current) where TEnum : struct, Enum

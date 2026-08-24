@@ -3,7 +3,7 @@ using StonkWatch.Web.Data;
 namespace StonkWatch.Web.Tests;
 
 /// <summary>
-/// The loose-parsing contract is what lets MCP tools accept natural-language values
+/// The loose-parsing contract is what lets pasted JSON use natural-language values
 /// ("high priority, near trigger") without exact C# casing. These tests lock it in.
 /// </summary>
 public class EnumParsingTests
@@ -47,7 +47,7 @@ public class EnumParsingTests
         var ex = Assert.Throws<ValidationException>(
             () => EnumParsing.ParseOrDefault("banana", CandidateStatus.Idea));
 
-        // The message must list the valid options — it is what an MCP client sees.
+        // The message must list the valid options — it is what a caller sees.
         Assert.Contains("banana", ex.Message);
         Assert.Contains(nameof(CandidateStatus.NearTrigger), ex.Message);
     }
@@ -85,7 +85,7 @@ public class EnumParsingTests
     [InlineData("complete", DataQuality.Complete)]
     [InlineData("PARTIAL", DataQuality.Partial)]
     [InlineData("un available", DataQuality.Unavailable)]
-    public void ParseOrDefault_handles_every_loose_enum_used_by_mcp(string raw, DataQuality expected)
+    public void ParseOrDefault_handles_every_loose_enum_format(string raw, DataQuality expected)
     {
         Assert.Equal(expected, EnumParsing.ParseOrDefault(raw, DataQuality.Unavailable));
     }

@@ -1,3 +1,4 @@
+using System.Text.Json;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.Mvc.RazorPages;
 using StonkWatch.Web.Contracts;
@@ -8,11 +9,14 @@ namespace StonkWatch.Web.Pages.Candidates;
 
 public class DetailModel(CandidateService service) : PageModel
 {
+    private static readonly JsonSerializerOptions JsonOptions = new() { PropertyNameCaseInsensitive = true };
+    private static readonly JsonSerializerOptions PrettyPrintOptions = new() { WriteIndented = true };
+
     [BindProperty(SupportsGet = true)]
     public string Ticker { get; set; } = "";
 
     [BindProperty]
-    public CandidateFormInput Form { get; set; } = new();
+    public string Json { get; set; } = "";
 
     [BindProperty]
     public LogReviewInput ReviewInput { get; set; } = new();
@@ -31,15 +35,28 @@ public class DetailModel(CandidateService service) : PageModel
             return NotFound();
         }
 
-        Form = CandidateFormInput.FromDto(Detail.Candidate);
+        Json = JsonSerializer.Serialize(CandidateJsonInput.FromDto(Detail.Candidate), PrettyPrintOptions);
         return Page();
     }
 
-    public async Task<IActionResult> OnPostSaveAsync(CancellationToken ct)
+    public async Task<IActionResult> OnPostUpdateJsonAsync(CancellationToken ct)
     {
+        CandidateJsonInput input;
         try
         {
-            var updated = await service.UpdateAsync(Ticker, Form.ToUpdateRequest(), ct);
+            input = JsonSerializer.Deserialize<CandidateJsonInput>(Json, JsonOptions)
+                ?? throw new JsonException("Empty JSON.");
+        }
+        catch (JsonException ex)
+        {
+            ErrorMessage = $"Couldn't parse that JSON: {ex.Message}";
+            Detail = await service.GetByTickerAsync(Ticker, ct);
+            return Page();
+        }
+
+        try
+        {
+            var updated = await service.UpdateWithHistoryAsync(Ticker, input.ToUpdateRequest(), ct);
             if (updated is null)
             {
                 return NotFound();

@@ -1,3 +1,4 @@
+using System.Text.Json;
 using Microsoft.EntityFrameworkCore;
 using StonkWatch.Web.Contracts;
 using StonkWatch.Web.Data;
@@ -108,6 +109,41 @@ public class CandidateService(StonkWatchDbContext db, TimeProvider timeProvider)
             return null;
         }
 
+        ApplyUpdate(candidate, request);
+        await db.SaveChangesAsync(ct);
+        return ToDto(candidate);
+    }
+
+    /// <summary>
+    /// Same PATCH semantics as <see cref="UpdateAsync"/>, but first snapshots the candidate's
+    /// full current state into <see cref="Data.Entities.CandidateHistoryEntry"/> so past
+    /// decisions stay recoverable. Used by the Detail page's JSON "Update" flow.
+    /// </summary>
+    public async Task<CandidateDto?> UpdateWithHistoryAsync(
+        string ticker, UpdateCandidateRequest request, CancellationToken ct = default)
+    {
+        var normalized = Normalize(ticker);
+        var candidate = await db.Candidates.FirstOrDefaultAsync(c => c.Ticker == normalized, ct);
+        if (candidate is null)
+        {
+            return null;
+        }
+
+        db.CandidateHistoryEntries.Add(new CandidateHistoryEntry
+        {
+            Id = Guid.NewGuid(),
+            CandidateId = candidate.Id,
+            SnapshotAt = timeProvider.GetUtcNow(),
+            PreviousState = JsonSerializer.Serialize(ToDto(candidate))
+        });
+
+        ApplyUpdate(candidate, request);
+        await db.SaveChangesAsync(ct);
+        return ToDto(candidate);
+    }
+
+    private void ApplyUpdate(Candidate candidate, UpdateCandidateRequest request)
+    {
         candidate.Company = MergeString(request.Company, candidate.Company);
         candidate.Exchange = MergeString(request.Exchange, candidate.Exchange);
         candidate.Currency = MergeString(request.Currency, candidate.Currency);
@@ -132,9 +168,6 @@ public class CandidateService(StonkWatchDbContext db, TimeProvider timeProvider)
         candidate.MainRisk = MergeString(request.MainRisk, candidate.MainRisk);
         candidate.SourceNotes = MergeString(request.SourceNotes, candidate.SourceNotes);
         candidate.UpdatedAt = timeProvider.GetUtcNow();
-
-        await db.SaveChangesAsync(ct);
-        return ToDto(candidate);
     }
 
     public async Task<bool> DeleteAsync(string ticker, CancellationToken ct = default)

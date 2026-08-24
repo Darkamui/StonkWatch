@@ -47,7 +47,7 @@ All configuration comes from environment variables or `dotnet user-secrets`. In 
 | `Auth:Google:ClientId` | ✅ | OAuth client ID from Google Cloud Console |
 | `Auth:Google:ClientSecret` | ✅ | OAuth client secret from Google Cloud Console |
 | `Auth:AllowedEmail` | ✅ | The one Google account allowed to sign in; every other Google login is rejected |
-| `Auth:ApiKey` | ✅ | Shared secret for `/api/*` and `/mcp` |
+| `Auth:ApiKey` | ✅ | Shared secret for `/api/*` |
 | `DataProtectionKeysPath` | in containers, and whenever Questrade is enabled | Directory for cookie/antiforgery keys, and the only thing that lets the encrypted Questrade refresh token survive a restart. Unset in a container ⇒ everyone is signed out on every restart. Unset with `Questrade:Enabled=true` ⇒ the app refuses to start (see Questrade below). |
 
 Nothing sensitive belongs in `appsettings.json` — it is committed.
@@ -217,13 +217,12 @@ read on every page, so a pull that lands first still breaks the UI until they ex
 |---|---|---|
 | Startup crash: `Connection string 'StonkWatch' is not configured` | `ConnectionStrings__StonkWatch` unset | Check the variable is passed to the container (`-e ConnectionStrings__StonkWatch=...`) |
 | Signed out after every restart | `DataProtectionKeysPath` unset or volume not mounted | Set it and mount `stonkwatch-keys:/keys` |
-| `401` from `/api` or `/mcp` | Header name or value wrong | Header is exactly `X-Api-Key`; compare against `Auth:ApiKey` |
+| `401` from `/api` | Header name or value wrong | Header is exactly `X-Api-Key`; compare against `Auth:ApiKey` |
 | "This Google account is not authorized" after sign-in | Email doesn't match `Auth:AllowedEmail` | Check the exact address you signed in with against the config value (case-insensitive) |
 | `redirect_uri_mismatch` from Google | Redirect URI not registered for this client | Add `https://<host>/signin-google` (or `http://localhost:<port>/signin-google` locally) under **Authorized redirect URIs** in Google Cloud Console |
 | Redirect loop to `/Account/Login` | Cookie dropped — proxy not forwarding `X-Forwarded-Proto` | Fix proxy headers; app needs to know the request was HTTPS |
 | `column ... does not exist` | Migrations not applied to this database | Run `dotnet ef database update` against it |
 | Timestamp write throws in Npgsql | Non-UTC `DateTimeOffset` reached a `timestamptz` column | `.ToUniversalTime()` before saving |
-| MCP tool returns "an error occurred" | Domain exception not wrapped | Wrap the call in `Guarded()` |
 | No alert emails at all | `Monitoring:Enabled` is false, or the worker never ticked | Dashboard badge shows the last run; `SELECT * FROM job_runs ORDER BY started_at DESC LIMIT 5` |
 | Every run says "Market closed" | Working outside 09:30–16:00 ET, a weekend, or a holiday | Expected. Set `Monitoring:IgnoreMarketHours=true` only for local testing |
 | Runs succeed, `candidates_checked` is 0 | Provider returned no prices — bad API key, exhausted quota, or unknown symbols | Check the logs for "Quote request rejected"; verify the ticker exists on Twelve Data |

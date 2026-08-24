@@ -16,8 +16,7 @@ flowchart TB
         K1["ASP.NET Core one-process design"]
         K2["Razor Pages — no SPA needed"]
         K3["EF Core + Postgres"]
-        K4["MCP in-process"]
-        K5["Single-user cookie + API-key auth"]
+        K4["Single-user cookie + API-key auth"]
     end
     subgraph add["➕ Add"]
         A1["BackgroundService + PeriodicTimer"]
@@ -332,7 +331,7 @@ Priorities, in order:
 
 1. `AlertEvaluator` — pure function, no database. Zone entry, level crossing, both
    directions, re-arm, nulls everywhere. **Highest value per line of test code.**
-2. `EnumParsing` — the loose-parsing contract MCP depends on.
+2. `EnumParsing` — the loose-parsing contract pasted JSON depends on.
 3. `CandidateService` PATCH semantics — the null/empty/value three-way merge.
 4. Endpoint smoke tests via `WebApplicationFactory`.
 

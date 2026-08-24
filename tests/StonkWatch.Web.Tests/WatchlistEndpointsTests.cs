@@ -107,8 +107,8 @@ public class WatchlistEndpointsTests(PostgresFixture fixture) : IAsyncLifetime
         client.DefaultRequestHeaders.Add("X-Api-Key", TestApiKey);
 
         // Raw JSON rather than the typed request record: {"symbol":null} is what a
-        // natural-language MCP call or a hand-rolled HTTP client can send, and the guard
-        // this test covers exists specifically to turn that into a 400 instead of a 500.
+        // hand-rolled HTTP client can send, and the guard this test covers exists
+        // specifically to turn that into a 400 instead of a 500.
         using var content = new StringContent(
             """{"symbol":null}""", System.Text.Encoding.UTF8, "application/json");
 

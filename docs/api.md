@@ -1,17 +1,8 @@
-# API & MCP Reference
+# API Reference
 
-Both surfaces are thin wrappers over
-[`CandidateService`](../src/StonkWatch.Web/Services/CandidateService.cs) and share the same
-semantics. Both require the `X-Api-Key` header.
-
-```mermaid
-flowchart LR
-    subgraph "Same brain, two dialects"
-        direction TB
-        API["/api/*<br/>JSON, exact types"] --> S["CandidateService"]
-        MCP["/mcp<br/>flat args, loose strings"] --> S
-    end
-```
+A thin wrapper over
+[`CandidateService`](../src/StonkWatch.Web/Services/CandidateService.cs) — it requires the
+`X-Api-Key` header and shares the service's validation semantics with the Razor UI.
 
 ## Authentication
 
@@ -144,57 +135,3 @@ curl -X POST "$BASE/api/candidates/ASTS/review" \
 # Alerts needing attention
 curl -H "X-Api-Key: $KEY" "$BASE/api/alerts?triggered=true"
 ```
-
-## MCP server
-
-Mounted at `/mcp` over streamable HTTP, same `X-Api-Key` header. Tools are defined in
-[`Mcp/WatchlistTools.cs`](../src/StonkWatch.Web/Mcp/WatchlistTools.cs) and auto-discovered.
-
-### Registering with Claude
-
-Add a custom connector pointing at `https://your-host/mcp` with a header named
-`X-Api-Key`. Claude never logs in interactively.
-
-### Tools
-
-| Tool | Purpose | Required |
-|---|---|---|
-| `add_candidate` | Create a candidate | `ticker` |
-| `update_candidate` | Partial update | `ticker` |
-| `list_watchlist` | List, optionally filtered | — |
-| `log_review` | Append a review + update the candidate | `ticker` |
-| `get_alerts` | Alerts across the watchlist | — |
-
-Full parameter lists are in the `[Description]` attributes — that source is the reference,
-because it is also what the model reads.
-
-### Design contract for tools
-
-- **Flat arguments, no nested objects.** Every field is a top-level parameter.
-- **Loose types.** Enum-ish fields are `string?` with valid values spelled out in the
-  description; dates are `string?` in `yyyy-MM-dd`.
-- **Only the key is required.** Everything else defaults to `null` so a partially-known
-  idea can be captured immediately.
-- **Errors must survive.** Domain exceptions are re-thrown as `McpException` by
-  `Guarded()`; without it the SDK replaces the message with a generic one.
-
-```mermaid
-flowchart LR
-    U["'add ASTS as high priority,<br/>watching the $59-60 reclaim'"] --> Claude
-    Claude -->|"add_candidate(ticker: 'ASTS',<br/>priority: 'high',<br/>reclaimTrigger1: 59, ...)"| MCP["/mcp"]
-    MCP --> Svc["CandidateService.CreateAsync"]
-    Svc --> DB[("Postgres")]
-    Svc -->|"CandidateDto"| Claude
-```
-
-### MCP vs API differences
-
-| | API | MCP |
-|---|---|---|
-| Naming | `PascalCase` JSON properties | flat camelCase parameters |
-| `setup` field | `preferredSetup` | `setup` |
-| Dates | ISO `DateOnly` | `string` `yyyy-MM-dd`, validated |
-| Not-found | `404` | `McpException` |
-| Alert writes | supported | **not exposed** — `get_alerts` is read-only |
-
-Adding alert creation to MCP is a reasonable future change; it just hasn't been needed.

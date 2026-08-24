@@ -50,4 +50,5 @@ public class Candidate
 
     public List<Alert> Alerts { get; set; } = [];
     public List<ReviewLogEntry> ReviewLogs { get; set; } = [];
+    public List<CandidateHistoryEntry> HistoryEntries { get; set; } = [];
 }

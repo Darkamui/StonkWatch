@@ -36,9 +36,9 @@ public record CandidateDto(
 public record CandidateDetailDto(CandidateDto Candidate, List<AlertDto> Alerts, List<ReviewLogDto> ReviewLogs);
 
 /// <summary>
-/// Every field but Ticker is optional and loosely-typed (plain strings for enums) so MCP tool calls
-/// built from natural language ("high priority, near trigger") don't need exact C# enum casing —
-/// the service layer coerces and validates.
+/// Every field but Ticker is optional and loosely-typed (plain strings for enums) so pasted JSON
+/// ("high priority, near trigger") doesn't need exact C# enum casing — the service layer coerces
+/// and validates.
 /// </summary>
 public record CreateCandidateRequest(
     string Ticker,

@@ -7,7 +7,7 @@ The goal: a change should be indistinguishable from the code around it.
 ```mermaid
 flowchart TB
     R1["1 · Business logic lives in Services/<br/><i>adapters stay thin</i>"]
-    R2["2 · Accept loose input, store strict types<br/><i>MCP speaks natural language</i>"]
+    R2["2 · Accept loose input, store strict types<br/><i>pasted JSON isn't always exact C# casing</i>"]
     R3["3 · Inject TimeProvider, never call UtcNow<br/><i>time must be testable</i>"]
     R4["4 · decimal for money, timestamptz in UTC<br/><i>no float, no local time</i>"]
     R5["5 · Domain errors are exceptions, adapters map them<br/><i>ValidationException / ConflictException</i>"]
@@ -101,7 +101,7 @@ flowchart LR
     E["1 · Data/Entities<br/>add property"] --> M["2 · DbContext<br/>+ dotnet ef migrations add"]
     M --> C["3 · Contracts<br/>Dto + Create/Update records"]
     C --> S["4 · Services<br/>map it in Create/Update/ToDto"]
-    S --> A["5 · Adapters<br/>endpoint · MCP tool · Razor form"]
+    S --> A["5 · Adapters<br/>endpoint · Razor form"]
     A --> T["6 · Test<br/>the service method"]
 ```
 
@@ -128,27 +128,6 @@ Register it in `Program.cs` next to the others. Return `Results.NotFound()` for 
 resource, `Results.BadRequest(new { error })` for `ValidationException`,
 `Results.Conflict(new { error })` for `ConflictException`, `Results.NoContent()` for a
 successful delete.
-
-### Adding an MCP tool
-
-```csharp
-[McpServerTool(Name = "snake_case_name")]
-[Description("What it does, plus the accepted values for any loose enum fields.")]
-public async Task<SomeDto> DoThing(
-    [Description("Ticker symbol, e.g. ASTS")] string ticker,
-    [Description("High, Medium, or Low")] string? priority = null,
-    CancellationToken cancellationToken = default)
-{
-    return await Guarded(async () => /* call the service */);
-}
-```
-
-- Tool names are `snake_case`; C# method names are `PascalCase`.
-- **Every parameter needs a `[Description]`** — it is the model's only documentation.
-- Enum-ish parameters are `string?` and list their valid values in the description.
-- Wrap anything that can throw a domain exception in `Guarded()`, or the caller gets
-  "an error occurred" instead of your message.
-- Tools are auto-discovered via `WithToolsFromAssembly()` — no registration needed.
 
 ### Adding a Razor page
 
@@ -198,7 +177,6 @@ public async Task<SomeDto> DoThing(
 | Table | plural snake_case | `candidates`, `review_log` |
 | `DbSet` | plural | `Candidates`, `ReviewLogs` |
 | Service method | `VerbNounAsync` | `LogReviewAsync`, `GetByTickerAsync` |
-| MCP tool | `snake_case` verb-first | `add_candidate`, `list_watchlist` |
 | Endpoint route | plural, kebab if needed | `/api/candidates/{ticker}/alerts` |
 | Migration | `PascalCaseDescription` | `AddQuoteHistory` |
 
@@ -228,7 +206,6 @@ it in configuration.
 - [ ] Migration added, and the model snapshot is committed with it
 - [ ] `TimeProvider` used instead of `DateTimeOffset.UtcNow`
 - [ ] `CancellationToken` threaded through new async methods
-- [ ] New MCP parameters have `[Description]` attributes
 - [ ] PATCH fields follow the null/empty/value semantics
 - [ ] No secrets in code, logs, or `appsettings.json`
 - [ ] `dotnet build` clean — no new warnings

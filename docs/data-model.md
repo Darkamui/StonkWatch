@@ -1,6 +1,6 @@
 # Data Model
 
-Four tables, all snake_case in Postgres (via `EFCore.NamingConventions`), all keyed by
+Five tables, all snake_case in Postgres (via `EFCore.NamingConventions`), all keyed by
 `uuid`. Enums are stored as **strings**, not ints — readable in `psql`, and safe to
 reorder in C#.
 
@@ -8,6 +8,7 @@ reorder in C#.
 erDiagram
     CANDIDATES ||--o{ ALERTS : "cascade delete"
     CANDIDATES ||--o{ REVIEW_LOG : "cascade delete"
+    CANDIDATES ||--o{ CANDIDATE_HISTORY_ENTRIES : "cascade delete"
     JOB_RUNS {
         uuid id PK
         text job "PriceCheck"
@@ -84,6 +85,13 @@ erDiagram
         bool levels_changed
         text next_action
         text notes
+    }
+
+    CANDIDATE_HISTORY_ENTRIES {
+        uuid id PK
+        uuid candidate_id FK
+        timestamptz snapshot_at
+        jsonb previous_state "full CandidateDto, pre-update"
     }
 ```
 
@@ -176,6 +184,7 @@ Callers never need exact casing —
 | `alerts.condition_signal` | Free text: what confirms the level, e.g. "daily close above with volume". |
 | `review_log.levels_changed` | Did this review move the support/trigger/target numbers? |
 | `job_runs.skip_reason` | Why a tick did nothing — "Market closed (weekend)", "No candidates with levels to monitor". A skipped run still counts as `Succeeded`. |
+| `candidate_history_entries.previous_state` | Full JSON snapshot of the candidate exactly as it was **before** a Candidate Detail page JSON update was applied — not a field diff. Written by `CandidateService.UpdateWithHistoryAsync`, one row per update. Nothing reads it back yet; history browsing is future work. |
 
 > **Remaining gap.** There is still no price history table, so charts and sparklines aren't
 > possible yet — the crossing logic only needs the previous quote, which lives on the
@@ -209,5 +218,5 @@ Rules:
 - **Timestamps are `timestamptz`** and Npgsql only accepts UTC-normalised
   `DateTimeOffset`. Call `.ToUniversalTime()` on anything coming from a client — see
   `LogReviewAsync`.
-- **Cascade delete** from candidate to alerts and review log. Deleting a ticker deletes
-  its history; that is intentional for a personal tool.
+- **Cascade delete** from candidate to alerts, review log, and history entries. Deleting a
+  ticker deletes its history; that is intentional for a personal tool.

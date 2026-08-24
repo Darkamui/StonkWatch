@@ -41,7 +41,7 @@ public class ApiKeyAuthenticationHandler(
             return Task.FromResult(AuthenticateResult.Fail("Invalid API key."));
         }
 
-        var identity = new ClaimsIdentity([new Claim(ClaimTypes.Name, "mcp-client")], SchemeName);
+        var identity = new ClaimsIdentity([new Claim(ClaimTypes.Name, "api-client")], SchemeName);
         var ticket = new AuthenticationTicket(new ClaimsPrincipal(identity), SchemeName);
         return Task.FromResult(AuthenticateResult.Success(ticket));
     }

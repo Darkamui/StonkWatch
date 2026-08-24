@@ -2,17 +2,28 @@ using StonkWatch.Web.Contracts;
 
 namespace StonkWatch.Web.Pages.Candidates;
 
-/// <summary>Shared field set for the New and Detail/Edit forms.</summary>
-public class CandidateFormInput
+/// <summary>
+/// The shape pasted into the Add/Update JSON boxes. Flat, camelCase-by-default field names
+/// matching what the (now removed) MCP tools used, so existing habits/notes built around that
+/// shape keep working. Deserialized with PropertyNameCaseInsensitive, so exact casing doesn't
+/// matter. "Setup" (not "PreferredSetup") is the property name specifically so it round-trips
+/// as "setup" in the pasted JSON without needing a JsonPropertyName override that would also
+/// affect the JSON API's contracts.
+/// </summary>
+public class CandidateJsonInput
 {
+    public string? Ticker { get; set; }
     public string? Company { get; set; }
     public string? Exchange { get; set; }
     public string? Currency { get; set; }
-    public string Priority { get; set; } = "Medium";
-    public string Status { get; set; } = "Idea";
+    public string? Priority { get; set; }
+    public string? Status { get; set; }
     public string? Conviction { get; set; }
-    public string? PreferredSetup { get; set; }
+    public string? DataQuality { get; set; }
+    public string? Setup { get; set; }
     public string? Thesis { get; set; }
+    public string? MainRisk { get; set; }
+    public string? SourceNotes { get; set; }
     public decimal? CurrentPrice { get; set; }
     public decimal? SupportLow { get; set; }
     public decimal? SupportHigh { get; set; }
@@ -25,32 +36,33 @@ public class CandidateFormInput
     public decimal? T2 { get; set; }
     public string? NextEvent { get; set; }
     public DateOnly? EventDate { get; set; }
-    public string DataQuality { get; set; } = "Unavailable";
-    public string? MainRisk { get; set; }
-    public string? SourceNotes { get; set; }
+
+    public CreateCandidateRequest ToCreateRequest() => new(
+        Ticker ?? "", Company, Exchange, Currency, Priority, Status, Conviction, Setup, Thesis,
+        CurrentPrice, SupportLow, SupportHigh, SecondarySupportLow, SecondarySupportHigh,
+        ReclaimTrigger1, ReclaimTrigger2, Invalidation, T1, T2,
+        NextEvent, EventDate, DataQuality, MainRisk, SourceNotes);
 
     public UpdateCandidateRequest ToUpdateRequest() => new(
-        Company, Exchange, Currency, Priority, Status, Conviction, PreferredSetup, Thesis,
+        Company, Exchange, Currency, Priority, Status, Conviction, Setup, Thesis,
         CurrentPrice, SupportLow, SupportHigh, SecondarySupportLow, SecondarySupportHigh,
         ReclaimTrigger1, ReclaimTrigger2, Invalidation, T1, T2,
         NextEvent, EventDate, DataQuality, MainRisk, SourceNotes);
 
-    public CreateCandidateRequest ToCreateRequest(string ticker) => new(
-        ticker, Company, Exchange, Currency, Priority, Status, Conviction, PreferredSetup, Thesis,
-        CurrentPrice, SupportLow, SupportHigh, SecondarySupportLow, SecondarySupportHigh,
-        ReclaimTrigger1, ReclaimTrigger2, Invalidation, T1, T2,
-        NextEvent, EventDate, DataQuality, MainRisk, SourceNotes);
-
-    public static CandidateFormInput FromDto(CandidateDto c) => new()
+    public static CandidateJsonInput FromDto(CandidateDto c) => new()
     {
+        Ticker = c.Ticker,
         Company = c.Company,
         Exchange = c.Exchange,
         Currency = c.Currency,
         Priority = c.Priority,
         Status = c.Status,
         Conviction = c.Conviction,
-        PreferredSetup = c.PreferredSetup,
+        DataQuality = c.DataQuality,
+        Setup = c.PreferredSetup,
         Thesis = c.Thesis,
+        MainRisk = c.MainRisk,
+        SourceNotes = c.SourceNotes,
         CurrentPrice = c.CurrentPrice,
         SupportLow = c.SupportLow,
         SupportHigh = c.SupportHigh,
@@ -62,9 +74,6 @@ public class CandidateFormInput
         T1 = c.T1,
         T2 = c.T2,
         NextEvent = c.NextEvent,
-        EventDate = c.EventDate,
-        DataQuality = c.DataQuality,
-        MainRisk = c.MainRisk,
-        SourceNotes = c.SourceNotes
+        EventDate = c.EventDate
     };
 }

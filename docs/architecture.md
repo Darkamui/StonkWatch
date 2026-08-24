@@ -3,13 +3,12 @@
 ## System view
 
 Everything is one process in one container. There is no message bus, no cache
-server, no separate MCP sidecar.
+server, no sidecar.
 
 ```mermaid
 flowchart TB
     subgraph clients["Clients"]
         Browser["Browser<br/><i>cookie auth</i>"]
-        Claude["Claude / MCP client<br/><i>X-Api-Key</i>"]
         Script["Scripts, curl<br/><i>X-Api-Key</i>"]
     end
 
@@ -19,7 +18,6 @@ flowchart TB
         direction TB
         Pages["Pages/<br/>Razor Pages"]
         Endpoints["Endpoints/<br/>minimal API /api/*"]
-        Mcp["Mcp/<br/>MCP tools /mcp"]
         Worker["Services/Monitoring/<br/>PriceCheckWorker<br/><i>opt-in</i>"]
         Service["Services/CandidateService<br/><b>all business logic</b>"]
         Job["Services/Monitoring/<br/>PriceCheckJob"]
@@ -27,18 +25,16 @@ flowchart TB
 
         Pages --> Service
         Endpoints --> Service
-        Mcp --> Service
         Worker --> Job
         Service --> Ef
         Job --> Ef
     end
 
-    Pg[("Postgres<br/>candidates · alerts · review_log · job_runs")]
+    Pg[("Postgres<br/>candidates · alerts · review_log · candidate_history · job_runs")]
     Quotes["Twelve Data<br/>/quote"]
     Smtp["SMTP relay"]
 
     Browser --> Proxy
-    Claude --> Proxy
     Script --> Proxy
     Proxy --> app
     Ef --> Pg
@@ -48,8 +44,8 @@ flowchart TB
 
 ## The layering rule
 
-**Three front doors, one brain.** Razor Pages, the JSON API, and MCP tools are all
-thin adapters. They parse input, call `CandidateService`, and shape the response.
+**Two front doors, one brain.** Razor Pages and the JSON API are both thin
+adapters. They parse input, call `CandidateService`, and shape the response.
 
 ```mermaid
 flowchart LR
@@ -57,7 +53,6 @@ flowchart LR
         direction TB
         A1["Razor PageModel"]
         A2["Endpoint lambda"]
-        A3["MCP tool method"]
     end
     subgraph brain["Service — thick"]
         S["CandidateService<br/>validate · normalise · persist · map to DTO"]
@@ -70,13 +65,13 @@ flowchart LR
 
 | Layer | Allowed to | Never |
 |---|---|---|
-| `Pages/`, `Endpoints/`, `Mcp/` | Parse input, call a service, map errors to a response | Touch `DbContext`, contain domain rules |
-| `Services/` | Validate, normalise, query, persist, map entity → DTO | Know about HTTP, Razor, or MCP |
+| `Pages/`, `Endpoints/` | Parse input, call a service, map errors to a response | Touch `DbContext`, contain domain rules |
+| `Services/` | Validate, normalise, query, persist, map entity → DTO | Know about HTTP or Razor |
 | `Data/` | Define entities, config, migrations | Contain behaviour |
 | `Contracts/` | Define DTOs and request records | Reference entities |
 
 If you find yourself injecting `StonkWatchDbContext` into a `PageModel`, stop — the
-logic belongs in a service method that all three front doors can share.
+logic belongs in a service method both front doors can share.
 
 ## Authentication
 
@@ -86,7 +81,7 @@ Two schemes coexist, selected per-route.
 flowchart TB
     Req["Incoming request"] --> Which{"Path?"}
     Which -->|"/, /Candidates/*"| Cookie["Cookie scheme<br/>30-day sliding"]
-    Which -->|"/api/*, /mcp"| ApiKey["ApiKey scheme<br/>X-Api-Key header<br/>FixedTimeEquals compare"]
+    Which -->|"/api/*"| ApiKey["ApiKey scheme<br/>X-Api-Key header<br/>FixedTimeEquals compare"]
     Which -->|"/Account/Login, /Error"| Anon["AllowAnonymous"]
     Cookie -->|"fail"| Redirect["302 → /Account/Login"]
     ApiKey -->|"fail"| Unauth["401"]
@@ -100,7 +95,7 @@ flowchart TB
 - Razor Pages: `options.Conventions.AuthorizeFolder("/")` in
   [`Program.cs`](../src/StonkWatch.Web/Program.cs) — everything is protected by default;
   `/Account/Login` and `/Error` opt out explicitly.
-- API + MCP: the `"ApiKey"` authorization policy, backed by
+- The JSON API: the `"ApiKey"` authorization policy, backed by
   [`ApiKeyAuthenticationHandler`](../src/StonkWatch.Web/Auth/ApiKeyAuthenticationHandler.cs).
   It uses `CryptographicOperations.FixedTimeEquals` — keep it that way.
 - **UI sign-in is Google OAuth**, restricted to a single address. `Login.cshtml.cs` issues a
@@ -114,7 +109,7 @@ flowchart TB
 
 ```mermaid
 sequenceDiagram
-    participant C as Client (UI / API / MCP)
+    participant C as Client (UI / API)
     participant S as CandidateService
     participant DB as Postgres
 
@@ -123,7 +118,7 @@ sequenceDiagram
     S->>S: EnumParsing.ParseOrDefault("near trigger") → NearTrigger
     S->>DB: SELECT ... WHERE ticker = @t
     alt exists
-        S-->>C: ConflictException → 409 / McpException
+        S-->>C: ConflictException → 409
     else
         S->>S: stamp CreatedAt / UpdatedAt from TimeProvider
         S->>DB: INSERT
@@ -134,7 +129,7 @@ sequenceDiagram
 Two design decisions worth knowing:
 
 1. **Loose input, strict storage.** Requests take `string?` for enum-like fields so a
-   natural-language MCP call (`"high priority, near trigger"`) works without exact C#
+   pasted-JSON value (`"priority": "high priority, near trigger"`) works without exact C#
    casing. [`EnumParsing`](../src/StonkWatch.Web/Data/EnumParsing.cs) strips spaces,
    dashes and underscores, then matches case-insensitively.
 2. **`TimeProvider` is injected**, never `DateTimeOffset.UtcNow` inside a service. This
@@ -145,16 +140,11 @@ Two design decisions worth knowing:
 
 Services throw two domain exceptions; each adapter translates them.
 
-| Exception | HTTP endpoint | MCP tool | Razor page |
-|---|---|---|---|
-| `ValidationException` | `400 { error }` | `McpException` (message preserved) | `ModelState` / `FilterError` |
-| `ConflictException` | `409 { error }` | `McpException` | flash message |
-| service returns `null` | `404` | `McpException("No candidate found…")` | `NotFound()` |
-
-MCP needs the `Guarded()` wrapper in
-[`WatchlistTools.cs`](../src/StonkWatch.Web/Mcp/WatchlistTools.cs) — the SDK replaces
-unrecognised exception types with a generic message, so domain errors must be re-thrown
-as `McpException` to survive.
+| Exception | HTTP endpoint | Razor page |
+|---|---|---|
+| `ValidationException` | `400 { error }` | `ModelState` / `FilterError` |
+| `ConflictException` | `409 { error }` | flash message |
+| service returns `null` | `404` | `NotFound()` |
 
 ## Price monitoring
 

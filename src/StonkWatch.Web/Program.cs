@@ -174,10 +174,6 @@ if (!string.IsNullOrEmpty(dataProtectionKeysPath))
         .SetApplicationName("StonkWatch");
 }
 
-builder.Services.AddMcpServer()
-    .WithHttpTransport()
-    .WithToolsFromAssembly();
-
 // Single-user app: anyone can attempt Google sign-in, but only this one address is let in.
 var allowedGoogleEmail = builder.Configuration["Auth:AllowedEmail"]
     ?? throw new InvalidOperationException(
@@ -292,8 +288,6 @@ if (questradeEnabled)
 {
     app.MapQuestradeEndpoints();
 }
-
-app.MapMcp("/mcp").RequireAuthorization("ApiKey");
 
 app.Run();
 
