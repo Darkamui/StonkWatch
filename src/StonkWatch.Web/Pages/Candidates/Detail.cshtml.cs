@@ -27,6 +27,9 @@ public class DetailModel(CandidateService service) : PageModel
     public CandidateDetailDto? Detail { get; private set; }
     public string? ErrorMessage { get; set; }
 
+    /// <summary>True when the JSON editor should render open instead of the read-only view — only after a failed edit attempt, so the user's edits and the error stay visible.</summary>
+    public bool ShowJsonEditor { get; set; }
+
     public async Task<IActionResult> OnGetAsync(CancellationToken ct)
     {
         Detail = await service.GetByTickerAsync(Ticker, ct);
@@ -41,6 +44,8 @@ public class DetailModel(CandidateService service) : PageModel
 
     public async Task<IActionResult> OnPostUpdateJsonAsync(CancellationToken ct)
     {
+        ShowJsonEditor = true;
+
         CandidateJsonInput input;
         try
         {

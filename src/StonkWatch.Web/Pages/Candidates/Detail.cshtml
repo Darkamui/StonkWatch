@@ -64,16 +64,83 @@
     <div class="alert alert-danger">@Model.ErrorMessage</div>
 }
 
-<form method="post" asp-page-handler="UpdateJson" asp-route-ticker="@Model.Ticker">
-    <p class="text-muted small mb-2">
-        Edit and repaste. Omitted fields are left unchanged; an empty string clears a text
-        field. The current state is snapshotted to history before the update is applied.
-    </p>
-    <textarea asp-for="Json" class="form-control font-monospace" rows="24" style="max-width: 48rem;"></textarea>
-    <div class="mt-3">
-        <button type="submit" class="btn btn-primary">Update</button>
-    </div>
-</form>
+@{
+    var c = Model.Detail.Candidate;
+}
+<div id="candidate-view" style="display:@(Model.ShowJsonEditor ? "none" : "block")">
+    <dl class="row mb-3">
+        <dt class="col-sm-3">Company</dt>
+        <dd class="col-sm-9">@(c.Company ?? "—")</dd>
+        <dt class="col-sm-3">Exchange / Currency</dt>
+        <dd class="col-sm-9">@(c.Exchange ?? "—") @(c.Currency is { Length: > 0 } ccy ? $"({ccy})" : "")</dd>
+        <dt class="col-sm-3">Priority / Status</dt>
+        <dd class="col-sm-9">@c.Priority &middot; @c.Status</dd>
+        <dt class="col-sm-3">Conviction / Data quality</dt>
+        <dd class="col-sm-9">@(c.Conviction ?? "—") &middot; @c.DataQuality</dd>
+        <dt class="col-sm-3">Current price</dt>
+        <dd class="col-sm-9">
+            @(c.CurrentPrice?.ToString("0.00##") ?? "—")
+            @if (c.LastReviewed is { } lastReviewed)
+            {
+                <span class="text-muted small">(reviewed @lastReviewed.ToString("yyyy-MM-dd"))</span>
+            }
+        </dd>
+        <dt class="col-sm-3">Next event</dt>
+        <dd class="col-sm-9">
+            @(c.NextEvent ?? "—")
+            @if (c.EventDate is { } eventDate)
+            {
+                <span class="text-muted small">(@eventDate.ToString("yyyy-MM-dd"))</span>
+            }
+        </dd>
+    </dl>
+    @if (!string.IsNullOrEmpty(c.PreferredSetup))
+    {
+        <h2 class="h6">Setup</h2>
+        <p style="white-space: pre-wrap;">@c.PreferredSetup</p>
+    }
+    @if (!string.IsNullOrEmpty(c.Thesis))
+    {
+        <h2 class="h6">Thesis</h2>
+        <p style="white-space: pre-wrap;">@c.Thesis</p>
+    }
+    @if (!string.IsNullOrEmpty(c.MainRisk))
+    {
+        <h2 class="h6">Main risk</h2>
+        <p style="white-space: pre-wrap;">@c.MainRisk</p>
+    }
+    @if (!string.IsNullOrEmpty(c.SourceNotes))
+    {
+        <h2 class="h6">Source notes</h2>
+        <p class="text-muted small" style="white-space: pre-wrap;">@c.SourceNotes</p>
+    }
+    <button type="button" class="btn btn-outline-secondary btn-sm" onclick="stonkwatchShowJsonEditor()">Edit (JSON)</button>
+</div>
+
+<div id="candidate-edit-json" style="display:@(Model.ShowJsonEditor ? "block" : "none")">
+    <form method="post" asp-page-handler="UpdateJson" asp-route-ticker="@Model.Ticker">
+        <p class="text-muted small mb-2">
+            Edit and repaste. Omitted fields are left unchanged; an empty string clears a text
+            field. The current state is snapshotted to history before the update is applied.
+        </p>
+        <textarea asp-for="Json" class="form-control font-monospace" rows="24" style="max-width: 48rem;"></textarea>
+        <div class="mt-3">
+            <button type="submit" class="btn btn-primary">Update</button>
+            <button type="button" class="btn btn-outline-secondary" onclick="stonkwatchShowView()">Cancel</button>
+        </div>
+    </form>
+</div>
+
+<script>
+    function stonkwatchShowJsonEditor() {
+        document.getElementById('candidate-view').style.display = 'none';
+        document.getElementById('candidate-edit-json').style.display = 'block';
+    }
+    function stonkwatchShowView() {
+        document.getElementById('candidate-edit-json').style.display = 'none';
+        document.getElementById('candidate-view').style.display = 'block';
+    }
+</script>
 
 <hr class="my-4" />
 
